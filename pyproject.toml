@@ -1,0 +1,15 @@
+[project]
+dependencies = [
+    "python-dotenv", # For secrets management
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+# This is the new standard location for rules
+select = ["E", "F", "I", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
