@@ -6,8 +6,9 @@ from unittest.mock import patch
 import pytest
 from eth_account import Account
 
+from core._secret_str import _MASKED, SecretStr
 from core.errors import WalletSecurityError, WalletValidationError
-from core.wallet import _MASKED, WalletManager, _secret_str
+from core.wallet import WalletManager
 
 # Deterministic test key — NOT a real wallet, safe to hardcode in tests.
 TEST_PRIVATE_KEY = "0x" + "ab" * 32
@@ -16,49 +17,49 @@ TEST_ADDRESS = TEST_ACCOUNT.address
 
 
 # ---------------------------------------------------------------------------
-# _secret_str
+# SecretStr
 # ---------------------------------------------------------------------------
 
 
 class TestSecretStr:
     def test_str_is_masked(self):
-        s = _secret_str("supersecret")
+        s = SecretStr("supersecret")
         assert str(s) == _MASKED
 
     def test_repr_is_masked(self):
-        s = _secret_str("supersecret")
+        s = SecretStr("supersecret")
         assert repr(s) == _MASKED
 
     def test_get_secret_value_returns_original(self):
-        s = _secret_str("supersecret")
+        s = SecretStr("supersecret")
         assert s.get_secret_value() == "supersecret"
 
     def test_equality(self):
-        a = _secret_str("same")
-        b = _secret_str("same")
+        a = SecretStr("same")
+        b = SecretStr("same")
         assert a == b
 
     def test_inequality(self):
-        a = _secret_str("one")
-        b = _secret_str("two")
+        a = SecretStr("one")
+        b = SecretStr("two")
         assert a != b
 
     def test_not_equal_to_plain_string(self):
-        s = _secret_str("value")
+        s = SecretStr("value")
         assert s != "value"
 
     def test_hash_consistency(self):
-        a = _secret_str("key")
-        b = _secret_str("key")
+        a = SecretStr("key")
+        b = SecretStr("key")
         assert hash(a) == hash(b)
 
     def test_cannot_pickle(self):
-        s = _secret_str("secret")
+        s = SecretStr("secret")
         with pytest.raises(WalletSecurityError, match="Cannot pickle"):
             pickle.dumps(s)
 
     def test_fstring_is_masked(self):
-        s = _secret_str("leaked")
+        s = SecretStr("leaked")
         assert "leaked" not in f"value={s}"
         assert _MASKED in f"value={s}"
 
@@ -346,10 +347,10 @@ class TestWalletManagerSecurity:
             assert TEST_PRIVATE_KEY[2:] not in record.getMessage()
 
     def test_private_key_wrapper_in_slot(self):
-        """Even if someone accesses the mangled slot, they get _secret_str, not raw key."""
+        """Even if someone accesses the mangled slot, they get SecretStr, not raw key."""
         wm = WalletManager(TEST_PRIVATE_KEY)
         mangled = wm._WalletManager__private_key
-        assert isinstance(mangled, _secret_str)
+        assert isinstance(mangled, SecretStr)
         assert str(mangled) == _MASKED
         assert repr(mangled) == _MASKED
 

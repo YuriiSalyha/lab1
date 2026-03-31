@@ -6,7 +6,7 @@ from eth_account import Account
 from eth_account.datastructures import SignedMessage, SignedTransaction
 from eth_account.messages import encode_defunct, encode_typed_data
 
-from core._secret_str import _MASKED, _secret_str
+from core._secret_str import _MASKED, SecretStr
 from core.errors import WalletSecurityError, WalletValidationError
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ class WalletManager:
             self._account = Account.from_key(private_key)
         except Exception:
             raise WalletValidationError("Invalid private key format") from None
-        self.__private_key = _secret_str(private_key)
+        self.__private_key = SecretStr(private_key)
 
     @classmethod
     def from_env(cls, env_var: str) -> "WalletManager":

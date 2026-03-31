@@ -3,7 +3,7 @@ from core.errors import WalletSecurityError
 _MASKED = "***REDACTED***"
 
 
-class _secret_str:
+class SecretStr:
     """Wrapper that prevents accidental exposure of secret values in logs, repr, or tracebacks."""
 
     __slots__ = ("_value",)
@@ -21,7 +21,7 @@ class _secret_str:
         return _MASKED
 
     def __eq__(self, other):
-        if isinstance(other, _secret_str):
+        if isinstance(other, SecretStr):
             return self._value == other._value
         return NotImplemented
 
