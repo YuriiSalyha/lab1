@@ -7,7 +7,8 @@ $venv_bin = "venv\Scripts"
 switch ($task) {
     "install" {
         & $python -m venv venv
-        & "$venv_bin\pip" install ruff pytest pre-commit python-dotenv
+        & "$venv_bin\pip" install -e .
+        & "$venv_bin\pip" install ruff pytest pre-commit
         & "$venv_bin\pre-commit" install
         Write-Host "Setup Completed" -ForegroundColor Green
     }

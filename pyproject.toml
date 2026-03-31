@@ -1,10 +1,18 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
 [project]
+name = "lab1"
+version = "0.1.0"
 dependencies = [
     "python-dotenv", # For secrets management
+    "eth-account", # For signing messages and transactions
 ]
 
 [tool.ruff]
-line-length = 88
+line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
