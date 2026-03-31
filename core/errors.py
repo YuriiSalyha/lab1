@@ -26,3 +26,11 @@ class WalletSecurityError(WalletError):
 
 class WalletValidationError(WalletError):
     """Raised when input validation fails (bad key format, empty message, etc.)."""
+
+
+class InvalidAddressError(WalletValidationError):
+    """Raised when an invalid Ethereum address is provided."""
+
+
+class TokenMathError(WalletValidationError):
+    """Raised when token arithmetic rules are violated (float math, mismatched decimals, etc.)."""
