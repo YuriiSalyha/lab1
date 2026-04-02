@@ -1,28 +1,32 @@
+"""Deterministic JSON encoding for signing and hashing (sorted keys, no floats)."""
+
+from __future__ import annotations
+
 import json
+import logging
 from typing import Any
 
 from eth_utils import keccak
 
 from core.errors import WalletValidationError
 
+logger = logging.getLogger(__name__)
+
 
 class CanonicalSerializer:
-    """
-    Produces deterministic JSON for signing.
+    """Deterministic JSON serialization for cryptographic hashing.
 
-    Rules / guarantees:
-    - Keys sorted alphabetically at every nesting level
-    - No whitespace in the JSON output
-    - Unicode preserved (emoji and non-ASCII safe)
-    - Very large integers serialized as exact decimal values
-    - Floats rejected outright (NaN / Infinity / rounding hazards)
-    - Dict keys must be strings (JSON spec requirement)
-    - Sets rejected (non-deterministic iteration order)
+    Guarantees:
+    - Keys sorted at every nesting level
+    - Compact separators (no spaces)
+    - Unicode preserved
+    - Large integers as exact JSON numbers
+    - Rejects floats and sets (non-deterministic or unsafe)
     """
 
     @staticmethod
     def _validate(obj: Any, *, _path: str = "$") -> None:
-        """Recursively validate the entire object graph before serialization."""
+        """Reject unsupported types before ``json.dumps``; *path* is for error messages."""
         if isinstance(obj, float):
             raise WalletValidationError(
                 f"Floating point value at {_path}. " "Use strings or integers instead."
@@ -47,7 +51,16 @@ class CanonicalSerializer:
 
     @staticmethod
     def serialize(obj: Any) -> bytes:
-        """Returns canonical UTF-8 bytes of the JSON representation."""
+        """
+        Args:
+            obj: JSON-serializable Python structure (see class rules).
+
+        Returns:
+            UTF-8 bytes of canonical JSON.
+
+        Raises:
+            WalletValidationError: Invalid type or ``json.dumps`` failure.
+        """
         CanonicalSerializer._validate(obj)
 
         try:
@@ -58,33 +71,61 @@ class CanonicalSerializer:
                 ensure_ascii=False,
                 allow_nan=False,
             )
-            return serialized.encode("utf-8")
         except (TypeError, ValueError) as e:
+            logger.warning("serialize failed: %s", e)
             raise WalletValidationError(f"Failed to serialize object: {e}") from None
+
+        out = serialized.encode("utf-8")
+        logger.debug("serialized %s bytes", len(out))
+        return out
 
     @staticmethod
     def deserialize(data: bytes) -> Any:
-        """Parse canonical JSON bytes back into a Python object."""
+        """
+        Args:
+            data: UTF-8 JSON bytes.
+
+        Returns:
+            Parsed Python object.
+
+        Raises:
+            WalletValidationError: Not bytes or invalid JSON.
+        """
         if not isinstance(data, bytes):
             raise WalletValidationError("Expected bytes input")
         try:
             return json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            logger.warning("deserialize failed: %s", e)
             raise WalletValidationError(f"Failed to deserialize: {e}") from None
 
     @staticmethod
     def hash(obj: Any) -> bytes:
-        """Returns keccak256 of canonical serialization."""
-        return keccak(CanonicalSerializer.serialize(obj))
+        """
+        Args:
+            obj: Same constraints as :meth:`serialize`.
+
+        Returns:
+            Keccak-256 digest of canonical UTF-8 JSON bytes.
+        """
+        digest = keccak(CanonicalSerializer.serialize(obj))
+        logger.debug("hash produced %s-byte digest", len(digest))
+        return digest
 
     @staticmethod
     def verify_determinism(obj: Any, iterations: int = 100) -> bool:
         """
-        Verifies serialization is deterministic over *iterations* runs.
+        Check that :meth:`serialize` is stable across repeated calls (same object).
 
-        Useful as a smoke-test: same object reference must always produce
-        identical bytes.  For cross-object determinism (different insertion
-        orders), build separate dicts in the test and compare directly.
+        Args:
+            obj: Value to serialize.
+            iterations: Number of runs (must be positive).
+
+        Returns:
+            True if every serialization matches the first.
+
+        Raises:
+            WalletValidationError: *iterations* <= 0.
         """
         if iterations <= 0:
             raise WalletValidationError("iterations must be a positive integer")

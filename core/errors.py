@@ -1,5 +1,14 @@
+"""Exception hierarchy for wallet validation, security, and token math.
+
+Subclasses of :class:`WalletError` carry optional ``code`` and ``details`` for APIs
+that need structured error responses.
+"""
+
+from __future__ import annotations
+
+
 class WalletError(Exception):
-    """Base class for all wallet-related errors."""
+    """Base class for wallet-related failures."""
 
     def __init__(
         self,
@@ -8,6 +17,12 @@ class WalletError(Exception):
         code: str | None = None,
         details: dict | None = None,
     ) -> None:
+        """
+        Args:
+            message: Human-readable description.
+            code: Optional machine-readable code (e.g. ``INVALID_KEY``).
+            details: Optional extra context (keep small; avoid secrets).
+        """
         self.code = code
         self.details = details or {}
         super().__init__(message)
@@ -20,17 +35,16 @@ class WalletError(Exception):
 
 
 class WalletSecurityError(WalletError):
-    """Raised when a security-sensitive operation fails
-    (bad password, pickle attempt, pickle attempt, etc.)."""
+    """Security-sensitive failure (bad password, pickle blocked, etc.)."""
 
 
 class WalletValidationError(WalletError):
-    """Raised when input validation fails (bad key format, empty message, etc.)."""
+    """Input validation failed (bad address, empty message, bad JSON, etc.)."""
 
 
 class InvalidAddressError(WalletValidationError):
-    """Raised when an invalid Ethereum address is provided."""
+    """String is not a valid 20-byte hex Ethereum address."""
 
 
 class TokenMathError(WalletValidationError):
-    """Raised when token arithmetic rules are violated (float math, mismatched decimals, etc.)."""
+    """Token amount rules violated (floats, mismatched decimals, etc.)."""

@@ -1,11 +1,18 @@
+"""Domain types: Ethereum addresses, token amounts, tx requests, and receipts."""
+
+from __future__ import annotations
+
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
-from typing import Optional
+from typing import Any, Optional
 
 from eth_utils import is_address, to_checksum_address
 
 from core.errors import InvalidAddressError, TokenMathError, WalletValidationError
+
+logger = logging.getLogger(__name__)
 
 # 78 digits covers uint256 (2^256 ≈ 1.16e77) with room to spare.
 _DECIMAL_PRECISION = 78
@@ -13,20 +20,41 @@ _DECIMAL_PRECISION = 78
 
 @contextmanager
 def _high_precision():
-    """Temporary Decimal context with enough precision for on-chain math."""
+    """Temporarily raise Decimal precision for uint256-scale math."""
     with localcontext() as ctx:
         ctx.prec = _DECIMAL_PRECISION
         yield ctx
 
 
+def _parse_to_address(to_val: Any) -> Address:
+    """Coerce *to_val* to :class:`Address` (used by :meth:`TransactionRequest.from_dict`)."""
+    if isinstance(to_val, Address):
+        return to_val
+    if isinstance(to_val, str):
+        return Address.from_string(to_val)
+    raise ValueError("Transaction must have a valid 'to' address")
+
+
+def _parse_value_field(value_val: Any) -> TokenAmount:
+    """Coerce *value* field to :class:`TokenAmount` (wei, 18 decimals)."""
+    if isinstance(value_val, TokenAmount):
+        return value_val
+    return TokenAmount(raw=int(value_val), decimals=18)
+
+
+def _receipt_tx_hash_hex(receipt: dict[str, Any]) -> str:
+    """Normalize ``transactionHash`` from a Web3 receipt to a ``0x`` hex string."""
+    th = receipt["transactionHash"]
+    return th.hex() if hasattr(th, "hex") else str(th)
+
+
 @dataclass(frozen=True)
 class Address:
-    """Ethereum address with validation and checksumming."""
+    """EIP-55 checksummed Ethereum address (20 bytes, ``0x`` + 40 hex)."""
 
     value: str
 
-    def __post_init__(self):
-        # Validate and convert to checksum
+    def __post_init__(self) -> None:
         if not isinstance(self.value, str):
             raise WalletValidationError("Address must be a string")
         if not self.value.startswith("0x"):
@@ -36,18 +64,27 @@ class Address:
         object.__setattr__(self, "value", to_checksum_address(self.value))
 
     @classmethod
-    def from_string(cls, s: str) -> "Address":
+    def from_string(cls, s: str) -> Address:
+        """
+        Args:
+            s: Hex address string (any casing; stored checksummed).
+
+        Returns:
+            Validated :class:`Address`.
+        """
         return cls(value=s)
 
     @property
     def checksum(self) -> str:
+        """Checksummed ``0x`` form (same as ``value``)."""
         return self.value
 
     @property
     def lower(self) -> str:
+        """Lowercase hex for case-insensitive keys."""
         return self.value.lower()
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if not isinstance(other, Address):
             return False
         return self.lower == other.lower
@@ -61,19 +98,13 @@ class Address:
 
 @dataclass(frozen=True)
 class TokenAmount:
-    """
-    Represents a token amount with proper decimal handling.
+    """Fixed-point token amount: integer raw units + decimals + optional symbol."""
 
-    Internally stores raw integer (wei-equivalent).
-    Provides human-readable formatting.
-    """
-
-    raw: int  # Raw amount (e.g., wei)
-    decimals: int  # Token decimals (e.g., 18 for ETH, 6 for USDC)
+    raw: int
+    decimals: int
     symbol: Optional[str] = None
 
-    def __post_init__(self):
-        # Ensure strict typing to catch developer errors early
+    def __post_init__(self) -> None:
         if isinstance(self.raw, float):
             raise TokenMathError("Floating point numbers are strictly forbidden in TokenAmount.")
         object.__setattr__(self, "raw", int(self.raw))
@@ -82,8 +113,16 @@ class TokenAmount:
             raise TokenMathError("decimals must be non-negative")
 
     @classmethod
-    def from_human(cls, amount: str | Decimal, decimals: int, symbol: str = None) -> "TokenAmount":
-        """Create from human-readable amount (e.g., '1.5' ETH)."""
+    def from_human(cls, amount: str | Decimal, decimals: int, symbol: str = None) -> TokenAmount:
+        """
+        Args:
+            amount: Human-readable quantity (string or Decimal, not float).
+            decimals: Token decimals (e.g. 18 for ETH).
+            symbol: Optional ticker for display.
+
+        Returns:
+            :class:`TokenAmount` in atomic units.
+        """
         if isinstance(amount, float):
             raise TokenMathError(
                 "Cannot initialize TokenAmount from a float. Use strings or Decimals."
@@ -100,10 +139,10 @@ class TokenAmount:
 
     @property
     def human(self) -> Decimal:
-        """Returns human-readable decimal."""
+        """Human-readable :class:`Decimal` (not rounded for display)."""
         return Decimal(self.raw) / Decimal(10**self.decimals)
 
-    def _check_compatible(self, other: "TokenAmount") -> None:
+    def _check_compatible(self, other: TokenAmount) -> None:
         if not isinstance(other, TokenAmount):
             raise TypeError("Operand must be a TokenAmount.")
         if self.decimals != other.decimals:
@@ -112,28 +151,27 @@ class TokenAmount:
                 f"{self.decimals} vs {other.decimals}"
             )
 
-    def __add__(self, other: "TokenAmount") -> "TokenAmount":
+    def __add__(self, other: TokenAmount) -> TokenAmount:
         self._check_compatible(other)
         symbol = self.symbol or other.symbol
         return TokenAmount(raw=self.raw + other.raw, decimals=self.decimals, symbol=symbol)
 
-    def __sub__(self, other: "TokenAmount") -> "TokenAmount":
+    def __sub__(self, other: TokenAmount) -> TokenAmount:
         self._check_compatible(other)
         symbol = self.symbol or other.symbol
         return TokenAmount(raw=self.raw - other.raw, decimals=self.decimals, symbol=symbol)
 
-    def __mul__(self, factor: int | Decimal) -> "TokenAmount":
+    def __mul__(self, factor: int | Decimal) -> TokenAmount:
         if isinstance(factor, float):
             raise TokenMathError("Floating point math forbidden. Use int, str, or Decimal.")
         if isinstance(factor, int) and not isinstance(factor, bool):
             new_raw = self.raw * factor
         else:
-            # Decimal factor: use precision large enough for 2^256-scale values
             with _high_precision():
                 new_raw = int(Decimal(self.raw) * Decimal(factor))
         return TokenAmount(raw=new_raw, decimals=self.decimals, symbol=self.symbol)
 
-    def __rmul__(self, factor: int | Decimal) -> "TokenAmount":
+    def __rmul__(self, factor: int | Decimal) -> TokenAmount:
         return self.__mul__(factor)
 
     def __str__(self) -> str:
@@ -142,23 +180,15 @@ class TokenAmount:
 
 @dataclass(frozen=True, eq=False)
 class Token:
-    """
-    Represents an ERC-20 token with its on-chain metadata.
-
-    Identity is by address only — two Token instances at the same address
-    are equal regardless of symbol/decimals (those are metadata, not identity).
-    We use eq=False to override the dataclass-generated __eq__ and define our own.
-
-    This type will be used extensively from Week 2 onward (AMM math, routing, etc.).
-    """
+    """ERC-20 token identity: address is the only field used in ``__eq__``/``__hash__``."""
 
     address: Address
     symbol: str
     decimals: int
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, Token):
-            return self.address == other.address  # Delegates to Address.__eq__ (case-insensitive)
+            return self.address == other.address
         return NotImplemented
 
     def __hash__(self) -> int:
@@ -170,7 +200,7 @@ class Token:
 
 @dataclass
 class TransactionRequest:
-    """A transaction ready to be signed."""
+    """Unsigned EIP-1559-style transaction fields for signing (Web3-compatible dict round-trip)."""
 
     to: Address
     value: TokenAmount
@@ -180,15 +210,50 @@ class TransactionRequest:
     max_fee_per_gas: Optional[int] = None
     max_priority_fee: Optional[int] = None
     chain_id: int = 1
+    from_address: Optional[str] = None
 
-    def to_dict(self) -> dict:
-        """Convert to web3-compatible dict."""
-        tx = {
+    @classmethod
+    def from_dict(cls, tx: dict[str, Any]) -> TransactionRequest:
+        """
+        Args:
+            tx: Web3-style dict (``to``, ``value``, ``data``, ``gas``, EIP-1559 fees, etc.).
+
+        Returns:
+            Parsed :class:`TransactionRequest`.
+
+        Raises:
+            ValueError: Invalid or missing ``to``.
+        """
+        to_addr = _parse_to_address(tx.get("to"))
+        value = _parse_value_field(tx.get("value", 0))
+        req = cls(
+            to=to_addr,
+            value=value,
+            data=tx.get("data", b""),
+            nonce=tx.get("nonce"),
+            gas_limit=tx.get("gas"),
+            max_fee_per_gas=tx.get("maxFeePerGas"),
+            max_priority_fee=tx.get("maxPriorityFeePerGas"),
+            chain_id=tx.get("chainId", 1),
+            from_address=tx.get("from"),
+        )
+        logger.debug(
+            "TransactionRequest from_dict: chain_id=%s has_nonce=%s",
+            req.chain_id,
+            req.nonce is not None,
+        )
+        return req
+
+    def to_dict(self) -> dict[str, Any]:
+        """Build a dict suitable for ``eth_signTransaction`` / ``sign_transaction``."""
+        tx: dict[str, Any] = {
             "to": self.to.checksum,
             "value": self.value.raw,
             "data": self.data,
             "chainId": self.chain_id,
         }
+        if self.from_address is not None:
+            tx["from"] = self.from_address
         if self.nonce is not None:
             tx["nonce"] = self.nonce
         if self.gas_limit is not None:
@@ -203,26 +268,32 @@ class TransactionRequest:
 
 @dataclass
 class TransactionReceipt:
-    """Parsed transaction receipt."""
+    """Subset of fields from an ``eth_getTransactionReceipt`` response."""
 
     tx_hash: str
     block_number: int
-    status: bool  # True = success
+    status: bool
     gas_used: int
     effective_gas_price: int
     logs: list
 
     @property
     def tx_fee(self) -> TokenAmount:
-        """Returns transaction fee as TokenAmount."""
+        """Approximate fee as ``gas_used * effective_gas_price`` (18-decimal wei)."""
         raw_fee = self.gas_used * self.effective_gas_price
         return TokenAmount(raw=raw_fee, decimals=18, symbol="GAS")
 
     @classmethod
-    def from_web3(cls, receipt: dict) -> "TransactionReceipt":
-        """Parse from web3 receipt dict."""
+    def from_web3(cls, receipt: dict[str, Any]) -> TransactionReceipt:
+        """
+        Args:
+            receipt: AttributeDict or dict from Web3 (snake_case keys).
+
+        Returns:
+            Normalized :class:`TransactionReceipt`.
+        """
         return cls(
-            tx_hash=receipt["transactionHash"].hex(),
+            tx_hash=_receipt_tx_hash_hex(receipt),
             block_number=receipt["blockNumber"],
             status=receipt["status"] == 1,
             gas_used=receipt["gasUsed"],
