@@ -32,6 +32,7 @@ Tests use `load_dotenv()`; the current suite does not require `.env` to pass.
 | Lint   | `.\run.ps1 lint`     |
 | Tests  | `.\run.ps1 test`     |
 | Run app| `.\run.ps1 start`    |
+| Analyze tx | `.\run.ps1 analyze <tx_hash> [--rpc URL]` |
 
 ## Without `run.ps1`
 
