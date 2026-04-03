@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from eth_utils import is_address
@@ -145,8 +146,9 @@ def validate_tx_dict(tx: Any) -> None:
 
 
 def validate_log_dict(log: Any) -> None:
-    if not isinstance(log, dict):
-        raise InvalidParameterError("log must be a dictionary.")
+    # Web3.py v7+ returns ReadableAttributeDict for logs; it is a Mapping but not dict.
+    if not isinstance(log, Mapping):
+        raise InvalidParameterError("log must be a dict-like mapping (e.g. RPC log entry).")
 
 
 def validate_logs_list(logs: Any) -> None:

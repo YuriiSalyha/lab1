@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import logging
+from collections.abc import Mapping
 from typing import Any, Optional
 
 from eth_abi import decode as abi_decode
@@ -419,7 +420,7 @@ class TransactionDecoder:
         )
 
     @staticmethod
-    def parse_event(log: dict[str, Any]) -> dict[str, Any]:
+    def parse_event(log: Mapping[str, Any]) -> dict[str, Any]:
         """Parse one log entry into event name + decoded fields when recognized.
 
         Args:
@@ -529,7 +530,7 @@ class TransactionDecoder:
         return {"name": "UnknownEvent", "address": address, "decoded": None, "raw": log}
 
     @staticmethod
-    def parse_events(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def parse_events(logs: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
         """Parse a list of event logs (same rules as :meth:`parse_event`)."""
         validate_logs_list(logs)
         return [TransactionDecoder.parse_event(log) for log in logs]
