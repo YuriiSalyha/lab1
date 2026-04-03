@@ -27,8 +27,12 @@ switch ($task) {
         }
         & "$venv_bin\python" -m chain.analyzer @RemainingArgs
     }
+    "integration" {
+        & "$venv_bin\python" scripts/integration_test_week1.py @RemainingArgs
+    }
     default {
-        Write-Host "Usage: .\run.ps1 [install|lint|test|start|analyze <args>]" -ForegroundColor Yellow
-        Write-Host "  analyze  -> python -m chain.analyzer (pass tx hash and optional --rpc)" -ForegroundColor Gray
+        Write-Host "Usage: .\run.ps1 [install|lint|test|start|analyze|integration]" -ForegroundColor Yellow
+        Write-Host "  analyze      -> python -m chain.analyzer (pass tx hash and optional --rpc)" -ForegroundColor Gray
+        Write-Host "  integration  -> Week 1 Sepolia suite (scripts/integration_test_week1.py)" -ForegroundColor Gray
     }
 }

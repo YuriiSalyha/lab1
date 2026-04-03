@@ -9,6 +9,9 @@ import logging
 from decimal import Decimal
 from typing import Any, Protocol
 
+from chain.errors import InvalidParameterError
+from chain.validation import validate_token_address_str
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,6 +31,7 @@ def token_symbol_and_decimals(client: _HasTokenCache, token_address: str) -> tup
     Returns:
         ``(symbol, decimals)`` with ``"???"`` / ``18`` on failure.
     """
+    validate_token_address_str(token_address)
     try:
         meta = client.token_cache.get(token_address)
         sym = str(meta.get("symbol", "???"))
@@ -46,6 +50,14 @@ def token_symbol_and_decimals(client: _HasTokenCache, token_address: str) -> tup
 
 def format_human_token_amount(raw: int | None, decimals: int, symbol: str) -> str:
     """Format a raw uint256 balance as ``\"1,234.5678 SYM\"``."""
+    if not isinstance(decimals, int) or isinstance(decimals, bool):
+        raise InvalidParameterError("decimals must be an integer.")
+    if decimals < 0:
+        raise InvalidParameterError(f"decimals must be non-negative, got {decimals}.")
+    if not isinstance(symbol, str):
+        raise InvalidParameterError("symbol must be a string.")
+    if raw is not None and (not isinstance(raw, int) or isinstance(raw, bool)):
+        raise InvalidParameterError("raw amount must be an integer or None.")
     if raw is None:
         return f"? {symbol}"
     human = Decimal(raw) / Decimal(10**decimals)

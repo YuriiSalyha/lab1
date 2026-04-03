@@ -186,6 +186,14 @@ class Token:
     symbol: str
     decimals: int
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.symbol, str):
+            raise WalletValidationError("Token.symbol must be a string.")
+        if not isinstance(self.decimals, int) or isinstance(self.decimals, bool):
+            raise WalletValidationError("Token.decimals must be an integer.")
+        if self.decimals < 0:
+            raise TokenMathError("Token.decimals must be non-negative.")
+
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Token):
             return self.address == other.address
@@ -224,12 +232,24 @@ class TransactionRequest:
         Raises:
             ValueError: Invalid or missing ``to``.
         """
+        if not isinstance(tx, dict):
+            raise WalletValidationError("Transaction must be a dictionary.")
         to_addr = _parse_to_address(tx.get("to"))
         value = _parse_value_field(tx.get("value", 0))
+        raw_data = tx.get("data", b"")
+        if raw_data is None:
+            raise WalletValidationError("Transaction 'data' must not be None.")
+        if isinstance(raw_data, str):
+            raise WalletValidationError(
+                "Transaction 'data' must be bytes-like, not a str (hex calldata should be bytes)."
+            )
+        if not isinstance(raw_data, (bytes, bytearray, memoryview)):
+            raise WalletValidationError("Transaction 'data' must be bytes-like.")
+        raw_data = bytes(raw_data)
         req = cls(
             to=to_addr,
             value=value,
-            data=tx.get("data", b""),
+            data=raw_data,
             nonce=tx.get("nonce"),
             gas_limit=tx.get("gas"),
             max_fee_per_gas=tx.get("maxFeePerGas"),

@@ -22,7 +22,7 @@ Python toolkit for **Ethereum account handling**, **JSON-RPC access**, and **tra
   python -m chain.analyzer 0x<64-hex-tx-hash> [--rpc https://...]
   ```
 
-  Set `RPC_ENDPOINT` or pass `--rpc`. Use a **full 32-byte transaction hash** (64 hex digits), not an address.
+  Defaults to **Ethereum mainnet**: `MAINNET_RPC`, then `ETH_MAINNET_RPC`, then `RPC_ENDPOINT`, then a public mainnet RPC. If `RPC_ENDPOINT` is a testnet, set `MAINNET_RPC` to a mainnet URL or pass `--rpc`. Use a **full 32-byte transaction hash** (64 hex digits), not an address.
 
 ## Requirements
 
@@ -39,9 +39,53 @@ First-time setup and macOS/Linux equivalents: **[docs/setup.md](docs/setup.md)**
 .\run.ps1 lint
 .\run.ps1 start     # placeholder entry (src/main.py)
 .\run.ps1 analyze 0x<64-hex-tx-hash> [--rpc https://...]   # transaction analyzer (needs venv)
+.\run.ps1 integration   # full Sepolia suite: smoke + edge cases (needs PRIVATE_KEY)
 ```
 
 Copy **`.env.example`** → **`.env`** when you need RPC URLs or secrets locally (see setup doc).
+
+### Integration tests (Sepolia)
+
+``.\run.ps1 integration`` runs ``scripts/integration_test_week1.py`` (smoke transfer, then pytest edge cases). One-liner: ``python scripts/integration_test_week1.py``.
+
+**Smoke step:** sends a small ETH transfer on Sepolia, verifies the signature locally, waits for confirmation, and checks the receipt.
+
+```powershell
+$env:PRIVATE_KEY="0x..."
+$env:SEPOLIA_RPC="https://eth-sepolia.g.alchemy.com/v2/YOUR_KEY"
+.\run.ps1 integration
+```
+
+Expected output:
+
+```
+Wallet: 0xYourAddress
+Balance: 0.5 ETH
+
+Building transaction...
+  To: 0xTestRecipient
+  Value: 0.0001 ETH
+  Estimated Gas: 21000
+  Max Fee: 35 gwei
+  Max Priority: 2 gwei
+
+Signing...
+  Signature valid: ✓
+  Recovered address matches: ✓
+
+Sending...
+  TX Hash: 0x...
+
+Waiting for confirmation...
+  Block: 1234567
+  Status: SUCCESS
+  Gas Used: 21000 (100%)
+  Fee: 0.000735 ETH
+
+Integration test PASSED
+```
+
+Requires a funded Sepolia wallet (faucet: https://sepoliafaucet.com/). See **[docs/setup.md](docs/setup.md)** for details.
 
 ## Project layout
 
@@ -49,7 +93,8 @@ Copy **`.env.example`** → **`.env`** when you need RPC URLs or secrets locally
 |------|---------|
 | `core/` | Domain types, wallet, serializer, errors |
 | `chain/` | RPC client, builder, decoder, analyzer CLI |
-| `tests/` | Pytest suite (`core` coverage; run `pytest` from repo root) |
+| `tests/` | Pytest suite (unit tests for `core` and `chain`) |
+| `scripts/` | `integration_test_week1.py` — Sepolia smoke + edge-case tests |
 | `docs/` | Setup guide and additional notes (e.g. package overview in `docs/Week1.md`) |
 
 ## Tooling

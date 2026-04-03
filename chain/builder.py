@@ -8,7 +8,12 @@ from typing import Any, Dict
 from eth_account.datastructures import SignedTransaction
 
 from chain.client import ChainClient
-from chain.errors import InsufficientFunds, TransactionFailed
+from chain.errors import InsufficientFunds, InvalidParameterError, TransactionFailed
+from chain.validation import (
+    normalize_tx_hash,
+    validate_gas_priority,
+    validate_timeout_seconds,
+)
 from core.types import Address, TokenAmount, TransactionReceipt, TransactionRequest
 from core.wallet import WalletManager
 
@@ -58,21 +63,35 @@ class TransactionBuilder:
 
     def data(self, calldata: bytes) -> TransactionBuilder:
         """Set contract calldata (``input``)."""
-        self._tx["data"] = calldata
+        if not isinstance(calldata, (bytes, bytearray, memoryview)):
+            raise InvalidParameterError("calldata must be bytes-like.")
+        self._tx["data"] = bytes(calldata)
         return self
 
     def nonce(self, nonce: int) -> TransactionBuilder:
         """Override automatic nonce (replacement txs, explicit sequencing)."""
+        if not isinstance(nonce, int) or isinstance(nonce, bool):
+            raise InvalidParameterError("nonce must be an integer.")
+        if nonce < 0:
+            raise InvalidParameterError(f"nonce must be non-negative, got {nonce}.")
         self._tx["nonce"] = nonce
         return self
 
     def gas_limit(self, limit: int) -> TransactionBuilder:
         """Set gas limit directly (skip estimation)."""
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            raise InvalidParameterError("gas limit must be an integer.")
+        if limit <= 0:
+            raise InvalidParameterError(f"gas limit must be positive, got {limit}.")
         self._tx["gas"] = limit
         return self
 
     def with_gas_estimate(self, buffer: float = 1.2) -> TransactionBuilder:
         """Set ``gas`` via ``eth_estimateGas`` × *buffer*."""
+        if isinstance(buffer, bool) or not isinstance(buffer, (int, float)):
+            raise InvalidParameterError("buffer must be a number.")
+        if buffer <= 0:
+            raise InvalidParameterError(f"buffer must be positive, got {buffer}.")
         logger.debug("estimating gas with buffer=%s", buffer)
         estimate = self.client.estimate_gas(self._tx)
         self._tx["gas"] = int(estimate * buffer)
@@ -81,6 +100,7 @@ class TransactionBuilder:
 
     def with_gas_price(self, priority: str = "medium") -> TransactionBuilder:
         """Set ``maxFeePerGas`` and ``maxPriorityFeePerGas`` from network snapshot."""
+        validate_gas_priority(priority)
         gas_price = self.client.get_gas_price()
         self._tx["maxFeePerGas"] = gas_price.get_max_fee(priority)
         self._tx["maxPriorityFeePerGas"] = gas_price.get_priority_fee(priority)
@@ -152,7 +172,9 @@ class TransactionBuilder:
         poll_interval: int = 2,
     ) -> TransactionReceipt:
         """Send and wait for receipt; raise :class:`TransactionFailed` on revert."""
-        tx_hash = self.send()
+        validate_timeout_seconds("timeout_seconds", timeout_seconds)
+        validate_timeout_seconds("poll_interval", poll_interval)
+        tx_hash = normalize_tx_hash(self.send())
         receipt = self.client.wait_for_receipt(
             tx_hash,
             timeout_seconds=timeout_seconds,

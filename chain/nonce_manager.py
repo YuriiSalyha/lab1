@@ -6,6 +6,9 @@ import logging
 import threading
 from typing import Any
 
+from chain.errors import InvalidParameterError
+from chain.validation import validate_eth_address_str
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,6 +25,11 @@ class NonceManager:
             address: Hex checksummed sender address string.
             web3: ``Web3`` instance (uses ``web3.eth.get_transaction_count``).
         """
+        validate_eth_address_str(address, param_name="address")
+        if web3 is None:
+            raise InvalidParameterError("web3 must not be None.")
+        if not hasattr(web3, "eth"):
+            raise InvalidParameterError("web3 must expose an 'eth' attribute.")
         self.address = address
         self.web3 = web3
         self.local_nonce: int | None = None

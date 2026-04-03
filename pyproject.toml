@@ -25,6 +25,9 @@ select = ["E", "F", "I", "B"]
 testpaths = ["tests"]
 # Project root must be on sys.path so `import core` / `import chain` work without PYTHONPATH hacks.
 pythonpath = ["."]
+markers = [
+    "integration: live Sepolia tests; requires PRIVATE_KEY and test ETH",
+]
 # web3 pulls websockets.legacy on import; upstream deprecation until web3 switches providers.
 filterwarnings = [
     "ignore:websockets.legacy is deprecated:DeprecationWarning",

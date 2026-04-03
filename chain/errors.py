@@ -17,6 +17,12 @@ class ChainError(Exception):
     pass
 
 
+class InvalidParameterError(ChainError):
+    """Caller passed an invalid argument (type, range, or format)."""
+
+    pass
+
+
 class RPCError(ChainError):
     """JSON-RPC call failed or returned an unexpected result."""
 

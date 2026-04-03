@@ -23,9 +23,44 @@ from chain.errors import (
     TransactionTimeout,
 )
 from chain.nonce_manager import NonceManager
+from chain.validation import (
+    normalize_tx_hash,
+    require_bytes,
+    validate_block_identifier,
+    validate_buffer_bps,
+    validate_gas_priority,
+    validate_max_retries,
+    validate_rpc_urls,
+    validate_timeout_seconds,
+    validate_token_address_str,
+    validate_tx_dict,
+)
 from core.types import Address, TokenAmount, TransactionReceipt, TransactionRequest
 
 logger = logging.getLogger(__name__)
+
+
+def _format_contract_logic_revert(err: ContractLogicError) -> str:
+    """Format ``ContractLogicError`` for display (ABI-decode ``data`` when possible)."""
+    msg = err.message
+    if isinstance(msg, str):
+        msg = msg.strip() or None
+    else:
+        msg = None
+    data = err.data
+
+    decoded: Optional[str] = None
+    if isinstance(data, str) and data.startswith("0x") and len(data) >= 10:
+        decoded = TransactionDecoder.decode_revert_reason(data)
+    elif isinstance(data, (bytes, bytearray, memoryview)):
+        decoded = TransactionDecoder.decode_revert_reason(bytes(data))
+
+    if decoded:
+        if msg and decoded in msg:
+            return msg
+        return decoded
+    return msg or str(err)
+
 
 # Minimal ABI fragments for lazy token metadata lookups
 _ERC20_METADATA_ABI = [
@@ -78,6 +113,7 @@ class TokenMetadataCache:
             Dict with ``address``, ``symbol``, ``decimals``, ``name``
             (placeholders if RPC calls fail).
         """
+        validate_token_address_str(token_address)
         key = token_address.lower()
         if key in self._cache:
             logger.debug("token cache hit: suffix=%s", key[-8:])
@@ -101,6 +137,7 @@ class TokenMetadataCache:
 
     def invalidate(self, token_address: str) -> None:
         """Drop one entry from the cache."""
+        validate_token_address_str(token_address)
         self._cache.pop(token_address.lower(), None)
 
 
@@ -113,16 +150,17 @@ class ChainClient:
         timeout_seconds: int = 30,
         max_retries: int = 3,
     ) -> None:
-        if not rpc_urls:
-            raise ValueError("At least one RPC URL is required")
+        validate_rpc_urls(rpc_urls)
+        validate_timeout_seconds("timeout_seconds", timeout_seconds)
+        validate_max_retries(max_retries)
 
-        self.rpc_urls = rpc_urls
+        self.rpc_urls = [u.strip() for u in rpc_urls]
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
 
         self._web3_instances = [
             Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": timeout_seconds}))
-            for url in rpc_urls
+            for url in self.rpc_urls
         ]
         self.w3: Web3 = self._web3_instances[0]
         logger.info("ChainClient init: %s endpoint(s), timeout=%ss", len(rpc_urls), timeout_seconds)
@@ -208,6 +246,7 @@ class ChainClient:
 
     def estimate_gas(self, tx: dict) -> int:
         """Return ``eth_estimateGas`` for *tx* dict."""
+        validate_tx_dict(tx)
         try:
             return self._execute_with_retry("estimate_gas", tx)
         except ContractLogicError as e:
@@ -242,6 +281,8 @@ class ChainClient:
 
     def send_raw_transaction(self, raw_tx: bytes) -> str:
         """Broadcast raw signed tx bytes; return tx hash hex string."""
+        require_bytes("raw_tx", raw_tx, allow_empty=False)
+        raw_tx = bytes(raw_tx)
         tx_hash = self._execute_with_retry("send_raw_transaction", raw_tx)
         h = tx_hash.hex()
         logger.info("submitted raw tx, hash_prefix=%s", h[:12])
@@ -254,6 +295,9 @@ class ChainClient:
         poll_interval_seconds: int = 2,
     ) -> TransactionReceipt:
         """Poll until receipt or timeout."""
+        tx_hash = normalize_tx_hash(tx_hash)
+        validate_timeout_seconds("timeout_seconds", timeout_seconds)
+        validate_timeout_seconds("poll_interval_seconds", poll_interval_seconds)
         try:
             raw_receipt = self.w3.eth.wait_for_transaction_receipt(
                 tx_hash,
@@ -273,6 +317,7 @@ class ChainClient:
 
     def get_transaction(self, tx_hash: str) -> dict:
         """Fetch transaction by hash; raises ``RPCError`` if missing or RPC fails."""
+        tx_hash = normalize_tx_hash(tx_hash)
         try:
             tx = self._execute_with_retry("get_transaction", tx_hash)
             if tx is None:
@@ -285,6 +330,7 @@ class ChainClient:
 
     def get_receipt(self, tx_hash: str) -> Optional[TransactionReceipt]:
         """Receipt if mined, else ``None`` (pending or unknown)."""
+        tx_hash = normalize_tx_hash(tx_hash)
         try:
             raw = self.w3.eth.get_transaction_receipt(tx_hash)
             if raw is None:
@@ -296,8 +342,11 @@ class ChainClient:
 
     def call(self, tx: dict | TransactionRequest, block: str = "latest") -> bytes:
         """``eth_call`` — pass a dict or ``TransactionRequest``."""
+        validate_block_identifier(block)
         if isinstance(tx, TransactionRequest):
             tx = tx.to_dict()
+        else:
+            validate_tx_dict(tx)
         return self._execute_with_retry("call", tx, block)
 
     # ------------------------------------------------------------------
@@ -306,6 +355,7 @@ class ChainClient:
 
     def get_revert_reason(self, tx_hash: str) -> Optional[str]:
         """Replay failed tx at inclusion block to surface revert data (best-effort)."""
+        tx_hash = normalize_tx_hash(tx_hash)
         try:
             tx = self.get_transaction(tx_hash)
             receipt = self.w3.eth.get_transaction_receipt(tx_hash)
@@ -324,9 +374,14 @@ class ChainClient:
             )
             return None
         except ContractLogicError as e:
-            return str(e)
+            return _format_contract_logic_revert(e)
         except Exception as e:
-            return TransactionDecoder.decode_revert_reason(str(e))
+            text = TransactionDecoder.humanize_revert_tuple_string(str(e))
+            if text.startswith("0x") and len(text) >= 10:
+                abi_text = TransactionDecoder.decode_revert_reason(text)
+                if abi_text:
+                    return abi_text
+            return text
 
     # ------------------------------------------------------------------
     # Node health
@@ -353,6 +408,7 @@ class ChainClient:
 
     def decode_transaction(self, tx_hash: str) -> dict[str, Any]:
         """Load tx by hash and attach decoded calldata under decoder output + ``tx`` key."""
+        tx_hash = normalize_tx_hash(tx_hash)
         tx = self.get_transaction(tx_hash)
         calldata = tx.get("input", b"")
         decoded = TransactionDecoder.decode_function_call(calldata)
@@ -361,6 +417,7 @@ class ChainClient:
 
     def parse_receipt_events(self, tx_hash: str) -> list[dict[str, Any]]:
         """Parse logs from mined receipt; empty list if still pending."""
+        tx_hash = normalize_tx_hash(tx_hash)
         receipt = self.get_receipt(tx_hash)
         if receipt is None:
             return []
@@ -368,6 +425,7 @@ class ChainClient:
 
     def get_tx_status(self, tx_hash: str) -> str:
         """``success`` | ``reverted`` | ``pending`` | ``unknown``."""
+        tx_hash = normalize_tx_hash(tx_hash)
         try:
             receipt = self.get_receipt(tx_hash)
             if receipt is None:
@@ -393,6 +451,7 @@ class GasPrice:
 
     def get_priority_fee(self, priority: str = "medium") -> int:
         """Tip component for *priority* tier (``low`` / ``medium`` / ``high``)."""
+        validate_gas_priority(priority)
         if priority == "low":
             return self.priority_fee_low
         if priority == "high":
@@ -401,6 +460,8 @@ class GasPrice:
 
     def get_max_fee(self, priority: str = "medium", buffer_bps: int = 2000) -> int:
         """``maxFeePerGas`` ≈ buffered base + tip; *buffer_bps* in basis points (2000 = 20%)."""
+        validate_gas_priority(priority)
+        validate_buffer_bps(buffer_bps)
         tip = self.get_priority_fee(priority)
         buffered_base = self.base_fee * (10_000 + buffer_bps) // 10_000
         return buffered_base + tip

@@ -5,7 +5,9 @@ Usage::
     python -m chain.analyzer TX_HASH [--rpc URL]
 
 Environment:
-    ``RPC_ENDPOINT`` — default RPC if ``--rpc`` is omitted.
+    ``RPC_ENDPOINT`` — primary RPC endpoint.
+    ``SEPOLIA_RPC`` — optional fallback RPC when the tx is not found on the primary
+    endpoint.
     ``LOG_FILE`` — optional path for log file (default: ``logs/lab1.log``).
 """
 
@@ -19,53 +21,41 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from dotenv import load_dotenv
+from eth_utils import to_checksum_address
 from web3 import Web3
 
 from chain.client import ChainClient
 from chain.decoder import TransactionDecoder
+from chain.errors import InvalidParameterError
 from chain.helpers import format_human_token_amount, token_symbol_and_decimals
+from chain.validation import normalize_tx_hash
 from core.logging_config import configure_project_logging
 
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------
-# Transaction hash validation
-# ------------------------------------------------------------------
+_DEFAULT_PUBLIC_MAINNET_RPC = "https://eth.llamarpc.com"
 
 
-def _normalize_tx_hash(value: str) -> str:
-    """Normalize *value* to a full 32-byte tx hash or raise ``ValueError``.
+def _default_mainnet_rpc_url() -> str:
+    """Primary RPC endpoint (tx hashes are expected here first)."""
+    return os.getenv("RPC_ENDPOINT") or _DEFAULT_PUBLIC_MAINNET_RPC
 
-    Args:
-        value: User-provided hash (with or without ``0x``).
 
-    Returns:
-        Lowercase ``0x`` + 64 hex digits.
+def _default_testnet_rpc_urls() -> list[str]:
+    """Candidate RPCs for fallback when the tx isn't found on the primary RPC."""
+    val = os.getenv("SEPOLIA_RPC")
+    return [val] if val else []
 
-    Raises:
-        ValueError: Wrong length, non-hex, or empty.
-    """
-    s = value.strip()
-    if not s.startswith("0x"):
-        s = "0x" + s
-    hex_part = s[2:]
-    if not hex_part:
-        raise ValueError("Empty transaction hash.")
-    try:
-        int(hex_part, 16)
-    except ValueError as err:
-        raise ValueError("Transaction hash must contain only hexadecimal digits.") from err
-    if len(hex_part) != 64:
-        if len(hex_part) == 40:
-            raise ValueError(
-                "This value has 40 hex digits (20 bytes), like an **address**, not a "
-                "transaction hash. A tx hash must be **64 hex digits** (32 bytes). "
-                "Copy the full hash from a block explorer (transaction detail page)."
-            )
-        raise ValueError(
-            f"Transaction hash must be exactly 64 hex digits (32 bytes); got {len(hex_part)}."
-        )
-    return "0x" + hex_part.lower()
+
+def _looks_like_tx_not_found(err: Exception) -> bool:
+    """Heuristic to decide whether we should try a different network."""
+    text = str(err).lower()
+    # Common geth/web3 responses:
+    # - "Transaction with hash ... not found"
+    # - "Transaction not found: ..."
+    # - "eth_getTransactionByHash" not found (varies by client/provider)
+    return "not found" in text or "transaction not found" in text
 
 
 # ------------------------------------------------------------------
@@ -109,6 +99,41 @@ def _fmt_uint_with_token(raw: int, decimals: int, symbol: str) -> str:
     return f"{raw:,} ({human:,.4f} {symbol})"
 
 
+def _fmt_bytes_compact(b: bytes) -> str:
+    """Hex preview for calldata / ABI ``bytes`` values (avoid huge ``repr`` dumps)."""
+    n = len(b)
+    if n == 0:
+        return "0x"
+    if n <= 48:
+        return "0x" + b.hex()
+    return f"0x{b[:20].hex()}…{b[-8:].hex()} ({n} bytes)"
+
+
+def _format_abi_value_preview(value: object, *, _depth: int = 0) -> str:
+    """Format ABI-decoded values (bytes, nested tuples) for one-line CLI output."""
+    if _depth > 8:
+        return "…"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return _fmt_bytes_compact(bytes(value))
+    if isinstance(value, str):
+        if len(value) > 160:
+            return value[:157] + "…"
+        return value
+    if isinstance(value, tuple):
+        inner = ", ".join(_format_abi_value_preview(x, _depth=_depth + 1) for x in value)
+        return f"({inner})"
+    if isinstance(value, list):
+        inner = ", ".join(_format_abi_value_preview(x, _depth=_depth + 1) for x in value)
+        return f"[{inner}]"
+    return str(value)
+
+
 def _fmt_deadline(ts: int) -> str:
     """Unix timestamp plus UTC datetime in parentheses."""
     dt = datetime.fromtimestamp(ts, tz=timezone.utc)
@@ -119,6 +144,25 @@ def _fmt_path_symbols(path: list[str], client: ChainClient) -> str:
     """``[SYM, SYM, ...]`` using token metadata for each hop."""
     labels = [token_symbol_and_decimals(client, a)[0] for a in path]
     return "[" + ", ".join(labels) + "]"
+
+
+def decode_uniswap_v3_path(path_bytes: bytes) -> list[str]:
+    """Decode Uniswap V3 ``path`` bytes: ``[token][fee][token][fee]…[token]``."""
+    if not path_bytes:
+        return []
+    tokens: list[str] = []
+    i = 0
+    while i < len(path_bytes):
+        if i + 20 > len(path_bytes):
+            break
+        chunk = path_bytes[i : i + 20]
+        tokens.append(to_checksum_address("0x" + chunk.hex()))
+        i += 20
+        if i < len(path_bytes):
+            if i + 3 > len(path_bytes):
+                break
+            i += 3
+    return tokens
 
 
 def _format_arg_value(
@@ -149,6 +193,16 @@ def _format_arg_value(
     if name == "deadline" and isinstance(value, int):
         return _fmt_deadline(value)
 
+    if (
+        name == "path"
+        and isinstance(value, (bytes, bytearray, memoryview))
+        and func_name == "exactInput"
+    ):
+        tokens = decode_uniswap_v3_path(bytes(value))
+        if tokens:
+            return _fmt_path_symbols(tokens, client)
+        return _fmt_bytes_compact(bytes(value))
+
     if name == "path" and isinstance(value, list) and value:
         return _fmt_path_symbols(value, client)
 
@@ -156,94 +210,105 @@ def _format_arg_value(
         if name in ("to", "from", "spender", "account", "tokenA", "tokenB", "token"):
             return f"{value} ({_short_addr(value)})"
 
-    if not isinstance(value, int):
-        return str(value)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return _format_abi_value_preview(value)
 
     # ERC-20: value field uses the token contract at tx["to"]
     if func_name in ("transfer", "approve", "transferFrom") and name == "value" and token_contract:
-        d, sym = token_symbol_and_decimals(client, token_contract)
-        return _fmt_uint_with_token(value, d, sym)
+        sym, dec = token_symbol_and_decimals(client, token_contract)
+        return _fmt_uint_with_token(value, dec, sym)
 
-    def _from_path(idx: int) -> tuple[int, str]:
-        assert path_list is not None
-        addr = path_list[idx]
-        return token_symbol_and_decimals(client, addr)
-
-    # Uniswap V2-style swaps — amounts map to path[0] (in) / path[-1] (out)
+    # ------------------------------------------------------------------
+    # Uniswap V2-style swaps — map amount fields to `path` indices
+    # ------------------------------------------------------------------
+    swap_param_to_path_index: dict[str, dict[str, int]] = {
+        "swapExactTokensForTokens": {"amountIn": 0, "amountOutMin": -1},
+        "swapExactTokensForETH": {"amountIn": 0, "amountOutMin": -1},
+        "swapExactETHForTokens": {"amountOutMin": -1},
+        "swapETHForExactTokens": {"amountOut": -1},
+        "swapTokensForExactTokens": {"amountOut": -1, "amountInMax": 0},
+        "swapTokensForExactETH": {"amountOut": -1, "amountInMax": 0},
+    }
     if path_list:
-        if func_name == "swapExactTokensForTokens":
-            if name == "amountIn":
-                d, sym = _from_path(0)
-                return _fmt_uint_with_token(value, d, sym)
-            if name == "amountOutMin":
-                d, sym = _from_path(-1)
-                return _fmt_uint_with_token(value, d, sym)
-        elif func_name == "swapExactTokensForETH":
-            if name == "amountIn":
-                d, sym = _from_path(0)
-                return _fmt_uint_with_token(value, d, sym)
-            if name == "amountOutMin":
-                d, sym = _from_path(-1)
-                return _fmt_uint_with_token(value, d, sym)
-        elif func_name == "swapExactETHForTokens" and name == "amountOutMin":
-            d, sym = _from_path(-1)
-            return _fmt_uint_with_token(value, d, sym)
-        elif func_name == "swapETHForExactTokens" and name == "amountOut":
-            d, sym = _from_path(-1)
-            return _fmt_uint_with_token(value, d, sym)
-        elif func_name == "swapTokensForExactTokens":
-            if name == "amountOut":
-                d, sym = _from_path(-1)
-                return _fmt_uint_with_token(value, d, sym)
-            if name == "amountInMax":
-                d, sym = _from_path(0)
-                return _fmt_uint_with_token(value, d, sym)
-        elif func_name == "swapTokensForExactETH":
-            if name == "amountOut":
-                d, sym = _from_path(-1)
-                return _fmt_uint_with_token(value, d, sym)
-            if name == "amountInMax":
-                d, sym = _from_path(0)
-                return _fmt_uint_with_token(value, d, sym)
+        idx = swap_param_to_path_index.get(func_name, {}).get(name)
+        if idx is not None:
+            sym, dec = token_symbol_and_decimals(client, path_list[idx])
+            return _fmt_uint_with_token(value, dec, sym)
 
-    # addLiquidity / removeLiquidity
-    if func_name == "addLiquidity":
-        if name in ("amountADesired", "amountAMin") and params.get("tokenA"):
-            a = str(params["tokenA"])
-            d, sym = token_symbol_and_decimals(client, a)
-            return _fmt_uint_with_token(value, d, sym)
-        if name in ("amountBDesired", "amountBMin") and params.get("tokenB"):
-            a = str(params["tokenB"])
-            d, sym = token_symbol_and_decimals(client, a)
-            return _fmt_uint_with_token(value, d, sym)
+    # ------------------------------------------------------------------
+    # Liquidity ops — map amount fields to token params / native ETH
+    # ------------------------------------------------------------------
+    liquidity_token_param_by_name: dict[str, dict[str, str]] = {
+        "addLiquidity": {
+            "amountADesired": "tokenA",
+            "amountAMin": "tokenA",
+            "amountBDesired": "tokenB",
+            "amountBMin": "tokenB",
+        },
+        "removeLiquidity": {
+            "amountAMin": "tokenA",
+            "amountBMin": "tokenB",
+        },
+        "addLiquidityETH": {
+            "amountTokenDesired": "token",
+            "amountTokenMin": "token",
+        },
+        "removeLiquidityETH": {
+            "amountTokenMin": "token",
+        },
+    }
+    token_param_key = liquidity_token_param_by_name.get(func_name, {}).get(name)
+    if token_param_key:
+        token_addr = params.get(token_param_key)
+        if token_addr:
+            a = str(token_addr)
+            sym, dec = token_symbol_and_decimals(client, a)
+            return _fmt_uint_with_token(value, dec, sym)
 
-    if func_name == "addLiquidityETH":
-        if name in ("amountTokenDesired", "amountTokenMin") and params.get("token"):
-            a = str(params["token"])
-            d, sym = token_symbol_and_decimals(client, a)
-            return _fmt_uint_with_token(value, d, sym)
-        if name in ("amountETHMin",):
-            return _fmt_uint_with_token(value, 18, "ETH")
-
-    if func_name == "removeLiquidity":
-        if name in ("amountAMin",) and params.get("tokenA"):
-            a = str(params["tokenA"])
-            d, sym = token_symbol_and_decimals(client, a)
-            return _fmt_uint_with_token(value, d, sym)
-        if name in ("amountBMin",) and params.get("tokenB"):
-            a = str(params["tokenB"])
-            d, sym = token_symbol_and_decimals(client, a)
-            return _fmt_uint_with_token(value, d, sym)
-
-    if func_name == "removeLiquidityETH":
-        if name == "amountTokenMin" and params.get("token"):
-            a = str(params["token"])
-            d, sym = token_symbol_and_decimals(client, a)
-            return _fmt_uint_with_token(value, d, sym)
-        if name == "amountETHMin":
-            return _fmt_uint_with_token(value, 18, "ETH")
+    liquidity_eth_param_names: dict[str, set[str]] = {
+        "addLiquidityETH": {"amountETHMin"},
+        "removeLiquidityETH": {"amountETHMin"},
+    }
+    if name in liquidity_eth_param_names.get(func_name, set()):
+        return _fmt_uint_with_token(value, 18, "ETH")
 
     return f"{value:,}"
+
+
+def _inner_call_headline(inner: dict) -> str:
+    """One-line label for a nested calldata chunk."""
+    if inner.get("function") == "unknown":
+        sel = inner.get("selector") or ""
+        return f"unknown(0x{sel})"
+    sig = inner.get("signature")
+    func = inner.get("function")
+    if sig and sig != func:
+        return str(sig)
+    return f"{func}(...)" if func else "unknown(...)"
+
+
+def _print_internal_calls(calls: list[object], client: ChainClient, tx: dict) -> None:
+    """Decode each ``bytes`` in a Uniswap-style ``multicall`` batch and print details."""
+    print()
+    print("Internal Calls")
+    print("-" * 40)
+    for i, raw in enumerate(calls, 1):
+        if not isinstance(raw, (bytes, bytearray, memoryview)):
+            print(f"{i}. (not calldata bytes)")
+            continue
+        inner = TransactionDecoder.decode_function_call(bytes(raw))
+        print(f"{i}. {_inner_call_headline(inner)}")
+        inner_func = inner.get("function") or "unknown"
+        inner_params = inner.get("params")
+        if not inner_params or inner_func == "unknown":
+            continue
+        order = inner.get("param_names") or list(inner_params.keys())
+        for pname in order:
+            if pname not in inner_params:
+                continue
+            val = inner_params[pname]
+            line = _format_arg_value(pname, val, inner_func, inner_params, tx, client)
+            print(f"     - {pname + ':':<16} {line}")
 
 
 def _print_function(decoded: dict, client: ChainClient, tx: dict) -> None:
@@ -271,6 +336,23 @@ def _print_function(decoded: dict, client: ChainClient, tx: dict) -> None:
     if not params:
         return
 
+    if func == "multicall":
+        inner_list = params.get("data")
+        if isinstance(inner_list, list) and inner_list:
+            order = decoded.get("param_names") or list(params.keys())
+            print("Arguments:")
+            for pname in order:
+                if pname not in params:
+                    continue
+                val = params[pname]
+                if pname == "data" and isinstance(val, list):
+                    print(f"  - {pname + ':':<18} {len(val)} sub-call(s) — see Internal Calls")
+                else:
+                    line = _format_arg_value(pname, val, func, params, tx, client)
+                    print(f"  - {pname + ':':<18} {line}")
+            _print_internal_calls(inner_list, client, tx)
+            return
+
     order = decoded.get("param_names") or list(params.keys())
     print("Arguments:")
     for pname in order:
@@ -290,7 +372,7 @@ def _print_header(tx_hash: str, tx: dict, receipt, block, w3: Web3) -> None:
     """Print summary block (hash, block, time, status, from/to/value)."""
     print()
     print("Transaction Analysis")
-    print("=" * 60)
+    print("=" * 100)
     print(f"{'Hash:':<20}{tx_hash}")
 
     if block is not None:
@@ -429,23 +511,50 @@ def _print_revert_info(tx_hash: str, client: ChainClient) -> None:
 # ------------------------------------------------------------------
 
 
-def analyze(tx_hash: str, rpc_url: str) -> None:
+def analyze(tx_hash: str, mainnet_rpc_url: str, testnet_rpc_urls: list[str] | None) -> None:
     """Fetch tx/receipt and print all sections to stdout.
 
     Args:
         tx_hash: Full 32-byte transaction hash (hex).
-        rpc_url: HTTP RPC endpoint.
+        mainnet_rpc_url: Mainnet RPC endpoint (tx hashes are expected here first).
+        testnet_rpc_urls: Testnet RPC endpoints to try if the tx is not found on mainnet.
     """
     logger.info("analyze start: hash_prefix=%s", tx_hash[:12])
-    client = ChainClient(rpc_urls=[rpc_url])
-    w3 = client.w3
+    rpc_candidates: list[tuple[str, str]] = [("mainnet", mainnet_rpc_url)]
+    if testnet_rpc_urls:
+        for u in testnet_rpc_urls:
+            if u and u != mainnet_rpc_url:
+                rpc_candidates.append(("testnet", u))
 
-    try:
-        tx = client.get_transaction(tx_hash)
-    except Exception as e:
-        logger.error("get_transaction failed: %s", e)
+    last_error: Exception | None = None
+    client: ChainClient | None = None
+    w3: Web3 | None = None
+    tx: dict | None = None
+
+    for label, rpc_url in rpc_candidates:
+        logger.info("Trying %s RPC: %s", label, rpc_url)
+        client = ChainClient(rpc_urls=[rpc_url])
+        w3 = client.w3
+        try:
+            tx = client.get_transaction(tx_hash)
+            break
+        except Exception as e:
+            last_error = e
+            if label == "mainnet" and _looks_like_tx_not_found(e):
+                logger.warning(
+                    "Tx not found on mainnet RPC; falling back to testnet (error: %s)", e
+                )
+                continue
+            logger.error("get_transaction failed on %s: %s", label, e)
+            print(f"\nError: Could not fetch transaction {tx_hash}")
+            print(f"  {e}")
+            sys.exit(1)
+
+    if tx is None or client is None or w3 is None:
+        assert last_error is not None
+        logger.error("No RPC succeeded: %s", last_error)
         print(f"\nError: Could not fetch transaction {tx_hash}")
-        print(f"  {e}")
+        print(f"  {last_error}")
         sys.exit(1)
 
     receipt = client.get_receipt(tx_hash)
@@ -502,7 +611,7 @@ def analyze(tx_hash: str, rpc_url: str) -> None:
     if not receipt.status:
         _print_revert_info(tx_hash, client)
 
-    print()
+    print("=" * 100)
     logger.info("analyze done: hash_prefix=%s", tx_hash[:12])
 
 
@@ -513,6 +622,7 @@ def analyze(tx_hash: str, rpc_url: str) -> None:
 
 def main() -> None:
     """CLI entry: validate hash, then :func:`analyze`."""
+    load_dotenv()
     parser = argparse.ArgumentParser(
         description="Analyze an Ethereum transaction",
         prog="python -m chain.analyzer",
@@ -520,8 +630,11 @@ def main() -> None:
     parser.add_argument("tx_hash", help="Transaction hash to analyze")
     parser.add_argument(
         "--rpc",
-        default=os.getenv("RPC_ENDPOINT", "https://eth.llamarpc.com"),
-        help="RPC endpoint URL (default: $RPC_ENDPOINT or public fallback)",
+        default=_default_mainnet_rpc_url(),
+        help=(
+            "Primary JSON-RPC URL (default: $RPC_ENDPOINT, then a public mainnet). "
+            "If the tx is not found there, the tool retries on $SEPOLIA_RPC."
+        ),
     )
 
     args = parser.parse_args()
@@ -530,12 +643,13 @@ def main() -> None:
     logging.getLogger(__name__).info("log file: %s", log_path)
 
     try:
-        tx_hash = _normalize_tx_hash(args.tx_hash)
-    except ValueError as err:
+        tx_hash = normalize_tx_hash(args.tx_hash)
+    except InvalidParameterError as err:
         print(f"\nInvalid transaction hash: {err}", file=sys.stderr)
         sys.exit(2)
 
-    analyze(tx_hash, args.rpc)
+    testnet_rpcs = _default_testnet_rpc_urls()
+    analyze(tx_hash, args.rpc, testnet_rpcs)
 
 
 if __name__ == "__main__":

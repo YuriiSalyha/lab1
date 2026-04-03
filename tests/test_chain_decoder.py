@@ -63,6 +63,41 @@ def test_decode_total_supply_no_args():
     assert out["signature"] == "totalSupply()"
 
 
+def test_decode_exact_input_calldata():
+    """Uniswap V3 ``exactInput`` — tuple (bytes path, address, uint256×3)."""
+    from eth_utils import to_checksum_address
+
+    # Minimal valid path: USDC —(fee)— WETH
+    path = (
+        bytes.fromhex("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+        + (3000).to_bytes(3, "big")
+        + bytes.fromhex("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2")
+    )
+    recipient = "0x1111111111111111111111111111111111111111"
+    body = encode(
+        ["(bytes,address,uint256,uint256,uint256)"],
+        [(path, recipient, 1, 2, 3)],
+    )
+    calldata = bytes.fromhex("c04b8d59") + body
+
+    out = TransactionDecoder.decode_function_call(calldata)
+    assert out["function"] == "exactInput"
+    assert out["selector"] == "c04b8d59"
+    assert out["params"] is not None
+    assert out["params"]["path"] == path
+    assert out["params"]["recipient"] == to_checksum_address(recipient)
+    assert out["params"]["deadline"] == 1
+    assert out["params"]["amountIn"] == 2
+    assert out["params"]["amountOutMinimum"] == 3
+    assert out["param_names"] == [
+        "path",
+        "recipient",
+        "deadline",
+        "amountIn",
+        "amountOutMinimum",
+    ]
+
+
 def test_parse_transfer_event():
     from eth_utils import to_checksum_address
 
@@ -100,9 +135,18 @@ def test_parse_events_list():
     assert out[0]["name"] == "UnknownEvent"
 
 
+def test_humanize_revert_tuple_string():
+    payload = bytes.fromhex("08c379a0") + encode(["string"], ["Return amount is not enough"])
+    hx = "0x" + payload.hex()
+    s = f"('execution reverted: Return amount is not enough', '{hx}')"
+    out = TransactionDecoder.humanize_revert_tuple_string(s)
+    assert out == "execution reverted: Return amount is not enough"
+    assert "0x08c379a0" not in out
+
+
 def test_decode_revert_error_string():
-    # Error(string): 0x08c379a2 + ABI-encoded string
-    payload = bytes.fromhex("08c379a2") + encode(["string"], ["insufficient liquidity"])
+    # Error(string): 0x08c379a0 + ABI-encoded string
+    payload = bytes.fromhex("08c379a0") + encode(["string"], ["insufficient liquidity"])
     reason = TransactionDecoder.decode_revert_reason(payload)
     assert reason == "insufficient liquidity"
 

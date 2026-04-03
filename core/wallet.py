@@ -12,6 +12,7 @@ from eth_account.messages import encode_defunct, encode_typed_data
 
 from core._secret_str import _MASKED, SecretStr
 from core.errors import WalletSecurityError, WalletValidationError
+from core.validation import require_non_empty_str, require_path_str
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class WalletManager:
         Raises:
             WalletValidationError: Variable is unset or empty.
         """
+        require_non_empty_str("env_var", env_var)
         private_key = os.getenv(env_var)
         if not private_key:
             logger.error("environment variable %s is not set", env_var)
@@ -166,6 +168,9 @@ class WalletManager:
             FileNotFoundError: Path does not exist.
             WalletSecurityError: Wrong password or corrupt file.
         """
+        require_path_str("path", path)
+        if not isinstance(password, str):
+            raise WalletValidationError("password must be a string.")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Keyfile not found at {path}")
         logger.info("loading keyfile from path=%s", path)
@@ -184,6 +189,9 @@ class WalletManager:
             path: Output JSON keystore path.
             password: Encryption password (min 8 characters).
         """
+        require_path_str("path", path)
+        if not isinstance(password, str):
+            raise WalletSecurityError("password must be a string.")
         if not password or len(password) < 8:
             raise WalletSecurityError("Password must be at least 8 characters long.")
         encrypted_data = Account.encrypt(self.__private_key.get_secret_value(), password)

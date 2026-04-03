@@ -6,11 +6,19 @@ and parses well-known event logs (Transfer, Swap, Sync).
 
 from __future__ import annotations
 
+import ast
 import logging
 from typing import Any, Optional
 
 from eth_abi import decode as abi_decode
 from eth_utils import to_checksum_address
+
+from chain.errors import InvalidParameterError
+from chain.validation import (
+    validate_calldata_input,
+    validate_log_dict,
+    validate_logs_list,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +163,7 @@ _FUNCTION_SELECTORS: dict[str, dict[str, Any]] = {
         "types": ["uint256", "bytes[]"],
         "param_names": ["deadline", "data"],
     },
-    "c04b8d59": {"name": "exactInput", "types": None, "param_names": None},
+    # exactInput(bytes,address,uint256,uint256,uint256) — decoded in :func:`_decode_exact_input`
     "414bf389": {"name": "exactInputSingle", "types": None, "param_names": None},
     "f28c0498": {"name": "exactOutput", "types": None, "param_names": None},
     "db3e2198": {"name": "exactOutputSingle", "types": None, "param_names": None},
@@ -173,8 +181,8 @@ _SWAP_V3_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbc
 _SYNC_TOPIC = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
 
 
-# Revert selectors
-_ERROR_SELECTOR = bytes.fromhex("08c379a2")  # Error(string)
+# Revert selectors (Error(string) = first 4 bytes of keccak256("Error(string)"))
+_ERROR_SELECTOR = bytes.fromhex("08c379a0")
 _PANIC_SELECTOR = bytes.fromhex("4e487b71")  # Panic(uint256)
 
 _PANIC_CODES: dict[int, str] = {
@@ -273,6 +281,39 @@ def _address_from_topic(topics: list, idx: int) -> Optional[str]:
     return to_checksum_address(bytes.fromhex(hex_str)[-20:])
 
 
+def _decode_exact_input(params_data: bytes, raw_data: str) -> dict[str, Any]:
+    """Decode Uniswap V3 ``exactInput(ExactInputParams)`` calldata."""
+    try:
+        (inner,) = abi_decode(["(bytes,address,uint256,uint256,uint256)"], params_data)
+        path_b, recipient, deadline, amount_in, amount_out_min = inner
+        params = {
+            "path": path_b,
+            "recipient": to_checksum_address(recipient),
+            "deadline": deadline,
+            "amountIn": amount_in,
+            "amountOutMinimum": amount_out_min,
+        }
+        param_names = ["path", "recipient", "deadline", "amountIn", "amountOutMinimum"]
+        return _function_decode_result(
+            function="exactInput",
+            selector_hex="c04b8d59",
+            signature="exactInput((bytes,address,uint256,uint256,uint256))",
+            params=params,
+            param_names=param_names,
+            raw_data=raw_data,
+        )
+    except Exception as err:
+        logger.warning("exactInput ABI decode failed: %s", err)
+        return _function_decode_result(
+            function="exactInput",
+            selector_hex="c04b8d59",
+            signature="exactInput",
+            params=None,
+            param_names=None,
+            raw_data=raw_data,
+        )
+
+
 def _try_decode_uint256(data_bytes: bytes) -> Optional[int]:
     if not data_bytes:
         return None
@@ -302,6 +343,7 @@ class TransactionDecoder:
             Dict with keys: ``function``, ``selector``, ``signature``, ``params``,
             ``param_names``, ``raw_data`` (see module docstring for semantics).
         """
+        validate_calldata_input(data)
         data = _calldata_to_bytes(data)
         raw_data = "0x" + data.hex()
 
@@ -318,6 +360,10 @@ class TransactionDecoder:
 
         selector_hex = data[:4].hex()
         params_data = data[4:]
+
+        if selector_hex == "c04b8d59":
+            return _decode_exact_input(params_data, raw_data)
+
         spec = _FUNCTION_SELECTORS.get(selector_hex)
 
         if spec is None:
@@ -382,6 +428,7 @@ class TransactionDecoder:
         Returns:
             Dict with ``name``, ``address``, ``decoded``, and ``raw`` (original log).
         """
+        validate_log_dict(log)
         topics = log.get("topics", [])
         if not topics:
             return {
@@ -484,7 +531,37 @@ class TransactionDecoder:
     @staticmethod
     def parse_events(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Parse a list of event logs (same rules as :meth:`parse_event`)."""
+        validate_logs_list(logs)
         return [TransactionDecoder.parse_event(log) for log in logs]
+
+    @staticmethod
+    def humanize_revert_tuple_string(text: str) -> str:
+        """If *text* is a repr like ``('execution reverted: …', '0x08c379a0…')``, decode bytes.
+
+        Web3's :class:`web3.exceptions.ContractLogicError` ``str()`` often looks like that;
+        this returns a single readable line (message, or ABI-decoded string, deduplicated).
+        """
+        cleaned = text.strip()
+        if not (cleaned.startswith("(") and cleaned.endswith(")")):
+            return text
+        try:
+            parsed = ast.literal_eval(cleaned)
+        except (ValueError, SyntaxError, MemoryError):
+            return text
+        if not isinstance(parsed, tuple) or len(parsed) < 2:
+            return text
+        msg, payload = parsed[0], parsed[1]
+        if not isinstance(msg, str) or not isinstance(payload, str):
+            return text
+        if not payload.startswith("0x") or len(payload) < 10:
+            return msg.strip()
+
+        decoded = TransactionDecoder.decode_revert_reason(payload)
+        if not decoded:
+            return msg.strip()
+        if decoded in msg:
+            return msg.strip()
+        return decoded
 
     @staticmethod
     def decode_revert_reason(data: bytes | str) -> Optional[str]:
@@ -496,8 +573,20 @@ class TransactionDecoder:
         Returns:
             Decoded string, or ``None`` if not recognized.
         """
+        if data is None:
+            raise InvalidParameterError("revert data must not be None.")
         if isinstance(data, str):
-            data = bytes.fromhex(data.replace("0x", ""))
+            raw_hex = data.replace("0x", "").strip()
+            if not raw_hex:
+                return None
+            try:
+                data = bytes.fromhex(raw_hex)
+            except ValueError as err:
+                raise InvalidParameterError("revert data hex is invalid.") from err
+        elif not isinstance(data, (bytes, bytearray, memoryview)):
+            raise InvalidParameterError("revert data must be str or bytes-like.")
+        else:
+            data = bytes(data)
 
         if len(data) < 4:
             return None
