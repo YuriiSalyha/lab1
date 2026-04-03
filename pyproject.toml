@@ -9,6 +9,8 @@ version = "0.1.0"
 dependencies = [
     "python-dotenv", # For secrets management
     "eth-account", # For signing messages and transactions
+    "web3>=6.0.0", # For Ethereum RPC and ABI interaction
+    "eth-abi>=4.0.0", # For manual ABI encoding/decoding in TransactionDecoder
 ]
 
 [tool.ruff]
@@ -21,3 +23,16 @@ select = ["E", "F", "I", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Project root must be on sys.path so `import core` / `import chain` work without PYTHONPATH hacks.
+pythonpath = ["."]
+markers = [
+    "integration: live Sepolia tests; requires PRIVATE_KEY and test ETH",
+]
+# web3 pulls websockets.legacy on import; upstream deprecation until web3 switches providers.
+filterwarnings = [
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "chain*"]
