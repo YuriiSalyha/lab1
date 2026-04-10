@@ -15,6 +15,7 @@ from eth_abi import decode as abi_decode
 from eth_utils import to_checksum_address
 
 from chain.errors import InvalidParameterError
+from chain.uniswap_v2_router import UNISWAP_V2_ROUTER_SWAP_ENTRIES
 from chain.validation import (
     validate_calldata_input,
     validate_log_dict,
@@ -54,37 +55,8 @@ _FUNCTION_SELECTORS: dict[str, dict[str, Any]] = {
         "types": [],
         "param_names": [],
     },
-    # ── Uniswap V2 Router ────────────────────────────────────────────────
-    "38ed1739": {
-        "name": "swapExactTokensForTokens",
-        "types": ["uint256", "uint256", "address[]", "address", "uint256"],
-        "param_names": ["amountIn", "amountOutMin", "path", "to", "deadline"],
-    },
-    "7ff36ab5": {
-        "name": "swapExactETHForTokens",
-        "types": ["uint256", "address[]", "address", "uint256"],
-        "param_names": ["amountOutMin", "path", "to", "deadline"],
-    },
-    "18cbafe5": {
-        "name": "swapExactTokensForETH",
-        "types": ["uint256", "uint256", "address[]", "address", "uint256"],
-        "param_names": ["amountIn", "amountOutMin", "path", "to", "deadline"],
-    },
-    "fb3bdb41": {
-        "name": "swapETHForExactTokens",
-        "types": ["uint256", "address[]", "address", "uint256"],
-        "param_names": ["amountOut", "path", "to", "deadline"],
-    },
-    "8803dbee": {
-        "name": "swapTokensForExactTokens",
-        "types": ["uint256", "uint256", "address[]", "address", "uint256"],
-        "param_names": ["amountOut", "amountInMax", "path", "to", "deadline"],
-    },
-    "4a25d94a": {
-        "name": "swapTokensForExactETH",
-        "types": ["uint256", "uint256", "address[]", "address", "uint256"],
-        "param_names": ["amountOut", "amountInMax", "path", "to", "deadline"],
-    },
+    # ── Uniswap V2 Router (swap methods — see :mod:`chain.uniswap_v2_router`) ─
+    **UNISWAP_V2_ROUTER_SWAP_ENTRIES,
     "e8e33700": {
         "name": "addLiquidity",
         "types": [

@@ -13,7 +13,7 @@ From the repo root:
 .\run.ps1 install
 ```
 
-This creates `venv\`, installs **ruff**, **pytest**, **pre-commit**, and **python-dotenv**, and runs `pre-commit install`.
+This creates `venv\`, installs the package in editable mode with **`[dev]`** extras from **`pyproject.toml`** (runtime deps plus **ruff**, **pytest**, **pre-commit**), and runs `pre-commit install`.
 
 ## Transaction analyzer (mainnet)
 
@@ -38,6 +38,11 @@ Tests use `load_dotenv()`; the current suite does not require `.env` to pass.
 | Run app| `.\run.ps1 start`    |
 | Analyze tx | `.\run.ps1 analyze <tx_hash> [--rpc URL]` |
 | Integration tests | `.\run.ps1 integration` (runs `scripts/integration_test_week1.py`) |
+| Price impact table (mainnet) | `.\run.ps1 pricing-impact -- --pool 0x... --token USDC` (pool ticker you sell); needs HTTP RPC env or `--rpc` |
+| Best route | `.\run.ps1 pricing-route -- --token-in 0x... --token-out 0x... --amount HUMAN` — optional `--pools`, `--discover fetch` or `cache` (subgraph env); same HTTP RPC as above |
+| Mempool Uniswap V2 swaps | `.\run.ps1 pricing-mempool` — needs `MAINNET_WS` / `WS_URL` / `ALCHEMY_WS` or `--ws` (`wss://...`) |
+
+Direct Python (from repo root, venv on): `python scripts/pricing_impact_table.py --help`, etc.
 
 ## Integration test (Sepolia)
 
@@ -76,7 +81,7 @@ $env:PRIVATE_KEY="0x..."; python scripts/integration_test_week1.py
 python -m venv venv
 # Windows: venv\Scripts\activate
 # Unix:    source venv/bin/activate
-pip install ruff pytest pre-commit python-dotenv
+pip install -e ".[dev]"
 pre-commit install
 pytest tests/
 ruff check . --fix
