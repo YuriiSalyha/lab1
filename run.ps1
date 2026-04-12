@@ -38,12 +38,16 @@ switch ($task) {
     "pricing-mempool" {
         & "$venv_bin\python" scripts/pricing_mempool_monitor.py @RemainingArgs
     }
+    "pricing-arb" {
+        & "$venv_bin\python" scripts/pricing_arbitrage_scan.py @RemainingArgs
+    }
     default {
-        Write-Host "Usage: .\run.ps1 [install|lint|test|start|analyze|integration|pricing-impact|pricing-route|pricing-mempool]" -ForegroundColor Yellow
+        Write-Host "Usage: .\run.ps1 [install|lint|test|start|analyze|integration|pricing-impact|pricing-route|pricing-mempool|pricing-arb]" -ForegroundColor Yellow
         Write-Host "  analyze          -> python -m chain.analyzer (pass tx hash and optional --rpc)" -ForegroundColor Gray
         Write-Host "  integration      -> Week 1 Sepolia suite (scripts/integration_test_week1.py)" -ForegroundColor Gray
         Write-Host "  pricing-impact   -> price impact (needs -- --pool 0x... --token SYMBOL)" -ForegroundColor Gray
         Write-Host "  pricing-route    -> best route (--token-in/out/amount; optional --discover fetch|cache)" -ForegroundColor Gray
         Write-Host "  pricing-mempool  -> pending Uniswap V2 swaps via WS (scripts/pricing_mempool_monitor.py)" -ForegroundColor Gray
+        Write-Host "  pricing-arb      -> cyclic arb scan on V2 pools (scripts/pricing_arbitrage_scan.py)" -ForegroundColor Gray
     }
 }

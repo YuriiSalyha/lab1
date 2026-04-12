@@ -1,4 +1,10 @@
-"""Orchestrates routing, fork simulation, and mempool monitoring."""
+"""Orchestrates routing, fork simulation, and mempool monitoring.
+
+Pool loading and fork swap execution here are **Uniswap V2 router** only
+(:func:`~pricing.fork_swap_executor.execute_swap_exact_tokens_for_tokens_on_fork`).
+:class:`~pricing.route_finder.RouteFinder` may quote mixed V2/V3 routes elsewhere, but this
+module does not simulate V3 swaps on a fork until a V3 execution path exists.
+"""
 
 from __future__ import annotations
 
