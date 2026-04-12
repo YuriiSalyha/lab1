@@ -141,3 +141,13 @@ def test_from_subgraph_row_rejects_zero_reserves() -> None:
         "token1": {"id": WETH_ADDR.checksum, "symbol": "WETH", "decimals": 18},
     }
     assert UniswapV2Pair.from_subgraph_row(row) is None
+
+
+def test_with_reserves_keeps_tokens_and_fee(weth_usdc_pair: UniswapV2Pair) -> None:
+    p2 = weth_usdc_pair.with_reserves(10**12, 10**18)
+    assert p2.address == weth_usdc_pair.address
+    assert p2.token0 == weth_usdc_pair.token0
+    assert p2.token1 == weth_usdc_pair.token1
+    assert p2.fee_bps == weth_usdc_pair.fee_bps
+    assert p2.reserve0 == 10**12
+    assert p2.reserve1 == 10**18

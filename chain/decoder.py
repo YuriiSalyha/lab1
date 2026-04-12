@@ -15,6 +15,7 @@ from eth_abi import decode as abi_decode
 from eth_utils import to_checksum_address
 
 from chain.errors import InvalidParameterError
+from chain.uniswap_v2_events import UNISWAP_V2_SYNC_TOPIC0
 from chain.uniswap_v2_router import UNISWAP_V2_ROUTER_SWAP_ENTRIES
 from chain.validation import (
     validate_calldata_input,
@@ -151,7 +152,6 @@ _TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df52
 _APPROVAL_TOPIC = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
 _SWAP_V2_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
 _SWAP_V3_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
-_SYNC_TOPIC = "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1"
 
 
 # Revert selectors (Error(string) = first 4 bytes of keccak256("Error(string)"))
@@ -487,7 +487,7 @@ class TransactionDecoder:
                 "raw": log,
             }
 
-        if topic0 == _SYNC_TOPIC:
+        if topic0 == UNISWAP_V2_SYNC_TOPIC0:
             try:
                 vals = abi_decode(["uint112", "uint112"], data_bytes)
             except Exception:
