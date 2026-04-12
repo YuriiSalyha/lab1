@@ -5,6 +5,28 @@ from core.types import Token
 from .uniswap_v2_pair import UniswapV2Pair
 
 
+def impact_row_for_amount(pair: UniswapV2Pair, token_in: Token, amount_in: int) -> dict:
+    """
+    Single-row price impact metrics for one trade size (shared by table, WS feed, history).
+
+    Returns:
+        ``amount_in``, ``amount_out``, ``spot_price``, ``execution_price``, ``price_impact_pct``.
+    """
+    if amount_in <= 0:
+        raise ValueError(f"Amount in must be greater than 0, got {amount_in}")
+    amount_out = pair.get_amount_out(amount_in, token_in)
+    spot_price = pair.get_spot_price(token_in)
+    execution_price = pair.get_execution_price(amount_in, token_in)
+    price_impact_pct = pair.get_price_impact(amount_in, token_in) * 100
+    return {
+        "amount_in": amount_in,
+        "amount_out": amount_out,
+        "spot_price": spot_price,
+        "execution_price": execution_price,
+        "price_impact_pct": price_impact_pct,
+    }
+
+
 class PriceImpactAnalyzer:
     """
     Analyzes price impact across different trade sizes for Uniswap V2 pairs.
@@ -30,28 +52,7 @@ class PriceImpactAnalyzer:
             'price_impact_pct': Decimal,
         }
         """
-        results = []
-
-        for amount_in in sizes:
-            if amount_in <= 0:
-                raise ValueError(f"Amount in must be greater than 0, got {amount_in}")
-
-            amount_out = self.pair.get_amount_out(amount_in, token_in)
-            spot_price = self.pair.get_spot_price(token_in)
-            execution_price = self.pair.get_execution_price(amount_in, token_in)
-            price_impact_pct = self.pair.get_price_impact(amount_in, token_in) * 100
-
-            results.append(
-                {
-                    "amount_in": amount_in,
-                    "amount_out": amount_out,
-                    "spot_price": spot_price,
-                    "execution_price": execution_price,
-                    "price_impact_pct": price_impact_pct,
-                }
-            )
-
-        return results
+        return [impact_row_for_amount(self.pair, token_in, amount_in) for amount_in in sizes]
 
     def find_max_size_for_impact(self, token_in: Token, max_impact_pct: Decimal) -> int:
         """

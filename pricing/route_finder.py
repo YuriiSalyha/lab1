@@ -1,38 +1,13 @@
 from __future__ import annotations
 
-from core.types import Address, Token
+from collections.abc import Sequence
 
-from .route import Route
-from .uniswap_v2_pair import UniswapV2Pair
-
-_ETH_SYMBOLS = frozenset({"ETH", "WETH", "wETH"})
-
-
-def _gas_cost_wei(gas_estimate: int, gas_price_gwei: int) -> int:
-    return gas_estimate * gas_price_gwei * 10**9
-
-
-def _gas_cost_in_output_token(
-    all_pools: list[UniswapV2Pair],
-    token_out: Token,
-    gas_wei: int,
-    eth_price_in_output: int | None,
-) -> int:
-    """Convert gas (wei) to *token_out* raw units using a WETH pair or explicit ETH price."""
-    if token_out.symbol in _ETH_SYMBOLS:
-        return gas_wei
-    for pool in all_pools:
-        t0, t1 = pool.token0, pool.token1
-        if token_out == t0 and t1.symbol in _ETH_SYMBOLS:
-            return gas_wei * pool.reserve0 // pool.reserve1
-        if token_out == t1 and t0.symbol in _ETH_SYMBOLS:
-            return gas_wei * pool.reserve1 // pool.reserve0
-    if eth_price_in_output is not None:
-        return gas_wei * eth_price_in_output // 10**18
-    raise ValueError(
-        "Cannot convert gas to output token: no pool with WETH/ETH and token_out, "
-        "and eth_price_in_output was not provided (raw output per 10**18 wei)"
-    )
+from core.types import Token
+from pricing.gas_cost import gas_cost_in_output_token, gas_cost_wei
+from pricing.liquidity_graph import build_adjacency, find_all_paths
+from pricing.liquidity_pool import LiquidityPoolQuote, as_liquidity_quote, v2_pools_for_gas_pricing
+from pricing.route import Route
+from pricing.uniswap_v2_pair import UniswapV2Pair
 
 
 class RouteFinder:
@@ -40,18 +15,10 @@ class RouteFinder:
     Finds optimal routes between tokens.
     """
 
-    def __init__(self, pools: list[UniswapV2Pair]):
-        self.pools = pools
-        self.graph = self._build_graph()
-
-    def _build_graph(self) -> dict[Token, list[tuple[UniswapV2Pair, Token]]]:
-        """Adjacency: token → [(pool, other_token), ...]."""
-        graph: dict[Token, list[tuple[UniswapV2Pair, Token]]] = {}
-        for pool in self.pools:
-            t0, t1 = pool.token0, pool.token1
-            graph.setdefault(t0, []).append((pool, t1))
-            graph.setdefault(t1, []).append((pool, t0))
-        return graph
+    def __init__(self, pools: Sequence[LiquidityPoolQuote | UniswapV2Pair]):
+        self.pools: list[LiquidityPoolQuote] = [as_liquidity_quote(p) for p in pools]
+        self._v2_for_gas = v2_pools_for_gas_pricing(self.pools)
+        self.graph = build_adjacency(self.pools)
 
     def find_all_routes(
         self,
@@ -62,41 +29,8 @@ class RouteFinder:
         """
         Find all simple routes up to max_hops pools.
         """
-        if token_in == token_out:
-            return []
-        if max_hops < 1:
-            return []
-
-        routes: list[Route] = []
-        used_pool_addrs: set[Address] = set()
-
-        def dfs(
-            current: Token,
-            path_tokens: list[Token],
-            pools_so_far: list[UniswapV2Pair],
-            hop_count: int,
-        ) -> None:
-            if current == token_out and hop_count > 0:
-                routes.append(Route(pools=list(pools_so_far), path=list(path_tokens)))
-                return
-            if hop_count >= max_hops:
-                return
-            for pool, nxt in self.graph.get(current, []):
-                addr = pool.address
-                if addr in used_pool_addrs:
-                    continue
-                if nxt in path_tokens:
-                    continue
-                used_pool_addrs.add(addr)
-                path_tokens.append(nxt)
-                pools_so_far.append(pool)
-                dfs(nxt, path_tokens, pools_so_far, hop_count + 1)
-                pools_so_far.pop()
-                path_tokens.pop()
-                used_pool_addrs.remove(addr)
-
-        dfs(token_in, [token_in], [], 0)
-        return routes
+        raw = find_all_paths(self.graph, token_in, token_out, max_hops)
+        return [Route(pools=p, path=t) for p, t in raw]
 
     def find_best_route(
         self,
@@ -120,9 +54,11 @@ class RouteFinder:
         best_net = -(10**36)
         for route in routes:
             gross = route.get_output(amount_in)
-            gas_units = route.estimate_gas()
-            gas_wei = _gas_cost_wei(gas_units, gas_price_gwei)
-            gas_out = _gas_cost_in_output_token(self.pools, token_out, gas_wei, eth_price_in_output)
+            gas_units = route.estimate_gas(amount_in)
+            gas_wei = gas_cost_wei(gas_units, gas_price_gwei)
+            gas_out = gas_cost_in_output_token(
+                self._v2_for_gas, token_out, gas_wei, eth_price_in_output
+            )
             net = gross - gas_out
             if net > best_net:
                 best_net = net
@@ -145,9 +81,11 @@ class RouteFinder:
         rows: list[dict] = []
         for route in self.find_all_routes(token_in, token_out, max_hops=max_hops):
             gross = route.get_output(amount_in)
-            gas_estimate = route.estimate_gas()
-            gas_wei = _gas_cost_wei(gas_estimate, gas_price_gwei)
-            gas_out = _gas_cost_in_output_token(self.pools, token_out, gas_wei, eth_price_in_output)
+            gas_estimate = route.estimate_gas(amount_in)
+            gas_wei = gas_cost_wei(gas_estimate, gas_price_gwei)
+            gas_out = gas_cost_in_output_token(
+                self._v2_for_gas, token_out, gas_wei, eth_price_in_output
+            )
             rows.append(
                 {
                     "route": route,

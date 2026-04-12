@@ -35,6 +35,7 @@ select = ["E", "F", "I", "B"]
 "scripts/pricing_impact_table.py" = ["E402", "I001"]
 "scripts/pricing_best_route.py" = ["E402", "I001"]
 "scripts/pricing_mempool_monitor.py" = ["E402", "I001"]
+"scripts/pricing_arbitrage_scan.py" = ["E402", "I001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

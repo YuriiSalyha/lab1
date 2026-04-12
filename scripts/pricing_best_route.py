@@ -16,6 +16,9 @@ Optional ``--pools`` defaults to several liquid mainnet Uniswap V2 pairs
 ``--discover fetch`` loads top pairs from a Uniswap V2 subgraph (see ``UNISWAP_V2_SUBGRAPH_URL``
 or ``THEGRAPH_API_KEY``) and merges them with ``--pools``; ``--discover cache`` reads a JSON cache.
 
+``--v3-resolve T0,T1`` queries the canonical V3 factory for default fee tiers and adds those pools
+(alongside repeatable ``--v3-pool ADDR``).
+
 Requires: MAINNET_RPC / RPC_ENDPOINT / ETH_MAINNET_RPC or ``--rpc``
 """
 
@@ -35,6 +38,7 @@ if str(_ROOT) not in sys.path:
 
 from chain.client import ChainClient
 from core.types import Address, Token, TokenAmount
+from pricing.liquidity_pool import LiquidityPoolQuote, as_liquidity_quote
 from pricing.route_finder import RouteFinder
 from pricing.uniswap_v2_discovery import (
     fetch_pair_rows_paginated,
@@ -45,6 +49,8 @@ from pricing.uniswap_v2_discovery import (
     save_pair_cache,
 )
 from pricing.uniswap_v2_pair import UniswapV2Pair
+from pricing.uniswap_v3_discovery import pools_for_pair
+from pricing.uniswap_v3_pool import UniswapV3PoolQuoter
 
 POOL_WETH_USDC = Address("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc")
 POOL_WETH_USDT = Address("0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852")
@@ -159,16 +165,28 @@ def _build_pool_list(
     )
 
 
-def _tokens_in_pools(pools: list[UniswapV2Pair]) -> set[Token]:
+def _tokens_in_pools(pools: list[LiquidityPoolQuote | UniswapV2Pair]) -> set[Token]:
     out: set[Token] = set()
     for pool in pools:
-        out.add(pool.token0)
-        out.add(pool.token1)
+        q = as_liquidity_quote(pool)
+        out.add(q.token0)
+        out.add(q.token1)
+    return out
+
+
+def _merge_v3_pools(
+    client: ChainClient,
+    base_pools: list[UniswapV2Pair],
+    v3_pool_addrs: list[Address],
+) -> list[LiquidityPoolQuote | UniswapV2Pair]:
+    out: list[LiquidityPoolQuote | UniswapV2Pair] = list(base_pools)
+    for addr in v3_pool_addrs:
+        out.append(UniswapV3PoolQuoter.from_chain(addr, client))
     return out
 
 
 def _report_no_route(
-    pools: list[UniswapV2Pair],
+    pools: list[LiquidityPoolQuote | UniswapV2Pair],
     token_in: Token,
     token_out: Token,
     addr_in: Address,
@@ -176,7 +194,7 @@ def _report_no_route(
 ) -> None:
     covered = _tokens_in_pools(pools)
     symbols = sorted({t.symbol for t in covered})
-    print("No route found using the loaded Uniswap V2 pools.")
+    print("No route found using the loaded pools (V2 and any --v3-pool).")
     print(f"Tokens present in loaded pools: {', '.join(symbols)}")
     if token_in not in covered:
         print(
@@ -197,7 +215,7 @@ def _report_no_route(
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Best Uniswap V2 route by net output (gas in output token)",
+        description="Best route by net output over Uniswap V2 (+ optional V3) pools",
     )
     p.add_argument("--rpc", default=None, help="HTTP mainnet RPC (overrides env)")
     p.add_argument(
@@ -270,6 +288,26 @@ def main() -> None:
         dest="gas_gwei",
         help="Gas price for net-output math",
     )
+    p.add_argument(
+        "--v3-pool",
+        action="append",
+        default=[],
+        metavar="ADDR",
+        help=(
+            "Uniswap V3 pool address (repeatable); fee/token0/token1 read on-chain; "
+            "quotes via QuoterV2 eth_call"
+        ),
+    )
+    p.add_argument(
+        "--v3-resolve",
+        action="append",
+        default=[],
+        metavar="T0,T1",
+        help=(
+            "Two ERC-20 addresses (comma-separated); add deployed V3 pools for 500/3000/10000 fee "
+            "(mainnet factory)"
+        ),
+    )
     args = p.parse_args()
 
     addr_in = Address(args.token_in)
@@ -308,6 +346,24 @@ def main() -> None:
         min_reserve_usd=args.min_reserve_usd,
         max_pools=args.max_pools,
     )
+    v3_seen: set[str] = set()
+    v3_addrs: list[Address] = []
+    for raw in args.v3_pool:
+        a = Address(raw)
+        if a.lower not in v3_seen:
+            v3_seen.add(a.lower)
+            v3_addrs.append(a)
+    for pair_spec in args.v3_resolve:
+        toks = [x.strip() for x in pair_spec.split(",") if x.strip()]
+        if len(toks) != 2:
+            raise SystemExit("--v3-resolve expects TOKEN0,TOKEN1 (comma-separated)")
+        for _fee, pool_cs in pools_for_pair(client.w3, toks[0], toks[1]):
+            a = Address(pool_cs)
+            if a.lower not in v3_seen:
+                v3_seen.add(a.lower)
+                v3_addrs.append(a)
+    if v3_addrs:
+        pools = _merge_v3_pools(client, pools, v3_addrs)
     finder = RouteFinder(pools)
 
     route, net_out = finder.find_best_route(

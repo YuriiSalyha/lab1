@@ -35,6 +35,26 @@ def test_route_output_matches_sequential_swaps() -> None:
     inter = route.get_intermediate_amounts(amount)
     assert inter == [amount, route.get_output(amount)]
     assert route.estimate_gas() == 150_000
+    assert route.estimate_gas(10**18) == 150_000
+
+
+def test_estimate_gas_sums_hop_quotes_multihop() -> None:
+    """With ``amount_in``, gas sums each hop's ``QuoteResult.gas_estimate`` (V2: 150k per hop)."""
+    a = _tok(A1, "A")
+    b = _tok(A2, "B")
+    c = _tok(A3, "C")
+    p0 = UniswapV2Pair(PAIR, a, b, 10**24, 10**24, 30)
+    p1 = UniswapV2Pair(
+        Address("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        b,
+        c,
+        10**24,
+        10**24,
+        30,
+    )
+    route = Route([p0, p1], [a, b, c])
+    assert route.estimate_gas() == 250_000
+    assert route.estimate_gas(10**18) == 300_000
 
 
 def test_direct_vs_multihop() -> None:

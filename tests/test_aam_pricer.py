@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 
 from core.types import Address, Token
-from pricing.price_impact_analyzer import PriceImpactAnalyzer
+from pricing.price_impact_analyzer import PriceImpactAnalyzer, impact_row_for_amount
 from pricing.uniswap_v2_pair import UniswapV2Pair
 
 # ---------------------------------------------------------------------------
@@ -179,6 +179,12 @@ def test_generate_impact_table_rows(analyzer: PriceImpactAnalyzer) -> None:
     assert isinstance(rows[0]["spot_price"], Decimal)
     assert isinstance(rows[0]["execution_price"], Decimal)
     assert isinstance(rows[0]["price_impact_pct"], Decimal)
+
+
+def test_impact_row_for_amount_matches_generate_impact_table(analyzer: PriceImpactAnalyzer) -> None:
+    weth = analyzer.pair.token1
+    single = impact_row_for_amount(analyzer.pair, weth, 10**17)
+    assert analyzer.generate_impact_table(weth, [10**17]) == [single]
 
 
 def test_generate_impact_table_rejects_non_positive(analyzer: PriceImpactAnalyzer) -> None:

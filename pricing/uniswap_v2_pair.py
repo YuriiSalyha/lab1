@@ -118,6 +118,17 @@ class UniswapV2Pair:
             fee_bps=self.fee_bps,
         )
 
+    def with_reserves(self, reserve0: int, reserve1: int) -> "UniswapV2Pair":
+        """Same pair metadata with new reserves (e.g. after a ``Sync`` event)."""
+        return UniswapV2Pair(
+            address=self.address,
+            token0=self.token0,
+            token1=self.token1,
+            reserve0=reserve0,
+            reserve1=reserve1,
+            fee_bps=self.fee_bps,
+        )
+
     @staticmethod
     def fetch_token_metadata(client: ChainClient, address: Address) -> dict:
         contract = client.w3.eth.contract(

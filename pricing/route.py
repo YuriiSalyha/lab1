@@ -1,5 +1,8 @@
+from collections.abc import Sequence
+
 from core.types import Token
 
+from .liquidity_pool import LiquidityPoolQuote, QuoteResult, as_liquidity_quote
 from .uniswap_v2_pair import UniswapV2Pair
 
 # Uniswap-style router gas heuristic: direct ~150k, each extra hop ~+100k.
@@ -10,8 +13,12 @@ _GAS_PER_EXTRA_HOP = 100_000
 class Route:
     """Represents a swap route through one or more pools."""
 
-    def __init__(self, pools: list[UniswapV2Pair], path: list[Token]):
-        self.pools = pools
+    def __init__(
+        self,
+        pools: Sequence[LiquidityPoolQuote | UniswapV2Pair],
+        path: list[Token],
+    ):
+        self.pools = [as_liquidity_quote(p) for p in pools]
         self.path = path  # token_in → intermediate... → token_out
         self._validate()
 
@@ -41,31 +48,44 @@ class Route:
     def token_out(self) -> Token:
         return self.path[-1]
 
-    def get_output(self, amount_in: int) -> int:
-        """Simulate full route, return final output."""
+    def quote_hops(self, amount_in: int) -> list[QuoteResult]:
+        """Quote each hop in order; output of hop *i* is input to hop *i+1*."""
         if amount_in <= 0:
             raise ValueError(f"amount_in must be positive, got {amount_in}")
-        amount = amount_in
-        for i, pool in enumerate(self.pools):
-            t = self.path[i]
-            amount = pool.get_amount_out(amount, t)
-        return amount
-
-    def get_intermediate_amounts(self, amount_in: int) -> list[int]:
-        """Return amount at each step: [input, after_hop1, after_hop2, ...]"""
-        if amount_in <= 0:
-            raise ValueError(f"amount_in must be positive, got {amount_in}")
-        amounts: list[int] = [amount_in]
+        out: list[QuoteResult] = []
         cur = amount_in
         for i, pool in enumerate(self.pools):
             t = self.path[i]
-            cur = pool.get_amount_out(cur, t)
-            amounts.append(cur)
+            qr = pool.quote_exact_input(t, cur)
+            out.append(qr)
+            cur = qr.amount_out
+        return out
+
+    def get_output(self, amount_in: int) -> int:
+        """Simulate full route, return final output."""
+        hops = self.quote_hops(amount_in)
+        return hops[-1].amount_out if hops else amount_in
+
+    def get_intermediate_amounts(self, amount_in: int) -> list[int]:
+        """Return amount at each step: [input, after_hop1, after_hop2, ...]"""
+        amounts: list[int] = [amount_in]
+        for qr in self.quote_hops(amount_in):
+            amounts.append(qr.amount_out)
         return amounts
 
-    def estimate_gas(self) -> int:
-        """Estimate gas: ~150k base + ~100k per additional hop."""
+    def estimate_gas(self, amount_in: int | None = None) -> int:
+        """
+        Gas units for the full route.
+
+        With ``amount_in > 0``, uses the sum of per-hop ``QuoteResult.gas_estimate`` (Quoter on
+        V3; V2 adapter uses a flat per-hop heuristic).
+
+        With ``amount_in`` omitted or non-positive, uses the legacy router-style heuristic
+        (~150k + ~100k per extra hop) when the trade size is unknown or RPC should be avoided.
+        """
         n = self.num_hops
         if n <= 0:
             return 0
-        return _BASE_SWAP_GAS + _GAS_PER_EXTRA_HOP * (n - 1)
+        if amount_in is None or amount_in <= 0:
+            return _BASE_SWAP_GAS + _GAS_PER_EXTRA_HOP * (n - 1)
+        return sum(q.gas_estimate for q in self.quote_hops(amount_in))

@@ -133,7 +133,7 @@ def test_simulate_route_delegates_and_gas_fallback() -> None:
 
     assert r.success
     assert r.amount_out == 42
-    assert r.gas_used == route.estimate_gas()
+    assert r.gas_used == route.estimate_gas(10**12)
     call_kw = mock_eth.call.call_args[0][0]
     assert call_kw["from"] == SENDER.checksum
     assert call_kw["to"] == ROUTER.checksum

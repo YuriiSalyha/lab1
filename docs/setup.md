@@ -41,8 +41,15 @@ Tests use `load_dotenv()`; the current suite does not require `.env` to pass.
 | Price impact table (mainnet) | `.\run.ps1 pricing-impact -- --pool 0x... --token USDC` (pool ticker you sell); needs HTTP RPC env or `--rpc` |
 | Best route | `.\run.ps1 pricing-route -- --token-in 0x... --token-out 0x... --amount HUMAN` — optional `--pools`, `--discover fetch` or `cache` (subgraph env); same HTTP RPC as above |
 | Mempool Uniswap V2 swaps | `.\run.ps1 pricing-mempool` — needs `MAINNET_WS` / `WS_URL` / `ALCHEMY_WS` or `--ws` (`wss://...`) |
+| V2 live price feed (Sync logs) | `.\run.ps1 pricing-ws-feed -- --pool 0x...` — HTTP RPC for metadata + same WebSocket env as mempool |
+| Historical V2 price impact | `.\run.ps1 pricing-history-impact -- --pool 0x... --from-block N --to-block M --token WETH --sizes 1e18` — **archive** HTTP RPC for old blocks |
 
 Direct Python (from repo root, venv on): `python scripts/pricing_impact_table.py --help`, etc.
+
+### WebSocket vs HTTP for pricing scripts
+
+- **Real-time pool reserves:** `pricing-ws-feed` subscribes to `Sync` logs over `wss://` (same URL variables as `pricing-mempool`). You still need an HTTP RPC to load pair metadata once at startup.
+- **Historical impact:** `eth_getLogs` over HTTP; use **archive** RPC for old `from_block`. Alchemy **free** caps each log query to about **10 blocks**; the tool defaults `--chunk-blocks 10` and, if the node returns HTTP 400, **shrinks the span automatically** so a large `--chunk-blocks` still works (with extra round-trips).
 
 ## Integration test (Sepolia)
 

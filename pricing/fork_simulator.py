@@ -221,7 +221,7 @@ class ForkSimulator:
             return SimulationResult(
                 success=res.success,
                 amount_out=res.amount_out,
-                gas_used=route.estimate_gas(),
+                gas_used=route.estimate_gas(amount_in),
                 error=res.error,
                 logs=res.logs,
             )

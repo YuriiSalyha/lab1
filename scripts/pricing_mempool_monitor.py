@@ -18,16 +18,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
-
-from dotenv import load_dotenv
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from chain.ws_env import resolve_websocket_url
 from pricing.mempool_monitor import MempoolMonitor
 from pricing.parsed_swap import ParsedSwap
 
@@ -38,15 +36,10 @@ logging.basicConfig(
 
 
 def _ws_url(cli_ws: str | None) -> str:
-    """This script only: resolve mainnet WebSocket URL (env or --ws)."""
-    load_dotenv()
-    if cli_ws and cli_ws.strip():
-        return cli_ws.strip()
-    for key in ("MAINNET_WS", "ETH_MAINNET_WS", "RPC_WS", "ALCHEMY_WS", "WS_URL"):
-        v = os.environ.get(key, "").strip()
-        if v:
-            return v
-    raise SystemExit("Set MAINNET_WS, WS_URL, ALCHEMY_WS, or pass --ws (wss:// mainnet)")
+    try:
+        return resolve_websocket_url(cli_ws)
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
 
 
 def _on_swap(swap: ParsedSwap) -> None:
