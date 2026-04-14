@@ -15,6 +15,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from chain.client import ChainClient
+from core.errors import InvalidAddressError
 from core.types import Address
 from pricing.arbitrage_scanner import ArbitrageScanner, default_amount_grid
 from pricing.batch_quote import BatchQuoteExecutor
@@ -31,6 +32,38 @@ def _rpc(cli: str | None) -> str:
         if v:
             return v
     raise SystemExit("Set MAINNET_RPC / ETH_MAINNET_RPC / RPC_ENDPOINT or --rpc")
+
+
+def _split_address_tokens(raw: str) -> list[str]:
+    """
+    Split a user-supplied list of addresses.
+
+    Accepts comma-separated and/or whitespace-separated tokens (helps PowerShell
+    where a comma can split the argument list).
+    """
+    out: list[str] = []
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if any(c in chunk for c in " \t\n\r"):
+            out.extend(w for w in chunk.split() if w)
+        else:
+            out.append(chunk)
+    return out
+
+
+def _address_or_exit(addr: str, *, flag: str) -> Address:
+    try:
+        return Address.from_string(addr)
+    except InvalidAddressError as e:
+        hint = (
+            f"Invalid value for {flag}: {addr!r}\n"
+            "Each address must be 0x followed by 40 hex characters (a real pair/pool contract).\n"
+            "Separate multiple addresses with commas or spaces. "
+            'In PowerShell, quote the whole list, e.g. --pools "0x...,0x...".'
+        )
+        raise SystemExit(hint) from e
 
 
 def main() -> None:
@@ -74,15 +107,17 @@ def main() -> None:
     if args.max_cycle_len < 2 or args.max_cycle_len > 4:
         raise SystemExit("--max-cycle-len must be 2–4")
 
-    parts = [x.strip() for x in args.pools.split(",") if x.strip()]
+    parts = _split_address_tokens(args.pools)
     v3_addrs = [x.strip() for x in args.v3_pool if x.strip()]
     if not parts and not v3_addrs:
         raise SystemExit("Provide --pools and/or one or more --v3-pool")
 
     client = ChainClient([_rpc(args.rpc)])
-    pools: list = [UniswapV2Pair.from_chain(Address(x), client) for x in parts]
+    pools: list = []
+    for x in parts:
+        pools.append(UniswapV2Pair.from_chain(_address_or_exit(x, flag="--pools"), client))
     for a in v3_addrs:
-        pools.append(UniswapV3PoolQuoter.from_chain(Address(a), client))
+        pools.append(UniswapV3PoolQuoter.from_chain(_address_or_exit(a, flag="--v3-pool"), client))
 
     batch_ex: BatchQuoteExecutor | None = None
     if args.batch:

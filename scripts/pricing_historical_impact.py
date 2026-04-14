@@ -22,7 +22,6 @@ import argparse
 import json
 import os
 import sys
-from decimal import Decimal
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -38,6 +37,7 @@ from pricing.historical_price_impact import (  # noqa: E402
     fetch_sync_snapshots,
     series_impact_for_sizes,
 )
+from pricing.raw_amount_list import parse_raw_amount_ints  # noqa: E402
 from pricing.uniswap_v2_pair import UniswapV2Pair  # noqa: E402
 
 
@@ -56,44 +56,13 @@ def _pair_address(cli_value: str) -> Address:
     raw = cli_value.strip()
     if raw in ("...", ".", "") or not raw.startswith("0x"):
         raise SystemExit(
-            "Invalid --pool: use the real 0x pair address (not the literal ...).\n"
+            "Invalid --pool: use the real 0x pair address.\n"
             "Example WETH/USDC: 0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc"
         )
     try:
         return Address(raw)
     except InvalidAddressError as e:
         raise SystemExit(f"Invalid --pool {raw!r}: must be a 40-hex-digit Ethereum address.") from e
-
-
-def _token_for_symbol(pair: UniswapV2Pair, symbol: str):
-    raw = symbol.strip()
-    if not raw:
-        raise SystemExit("--token must be non-empty")
-    key = raw.upper()
-    for t in (pair.token0, pair.token1):
-        if t.symbol.upper() == key:
-            return t
-    if key == "ETH":
-        for t in (pair.token0, pair.token1):
-            if t.symbol.upper() == "WETH":
-                return t
-    opts = f"{pair.token0.symbol}, {pair.token1.symbol}"
-    raise SystemExit(f"Token symbol {raw!r} is not on this pair. Use one of: {opts}")
-
-
-def _parse_sizes(s: str) -> list[int]:
-    out: list[int] = []
-    for part in s.split(","):
-        part = part.strip().replace("_", "")
-        if not part:
-            continue
-        try:
-            out.append(int(Decimal(part)))
-        except Exception as e:
-            raise SystemExit(f"Invalid size {part!r} (use integer raw units)") from e
-    if not out:
-        raise SystemExit("--sizes must list at least one positive integer")
-    return out
 
 
 def main() -> None:
@@ -111,7 +80,7 @@ def main() -> None:
     p.add_argument(
         "--sizes",
         required=True,
-        help="Comma-separated raw amount_in values (same units as on-chain)",
+        help="Raw amount_in values: commas and/or spaces (same units as on-chain)",
     )
     p.add_argument(
         "--output-format",
@@ -134,8 +103,14 @@ def main() -> None:
     rpc = _http_rpc(args.rpc)
     client = ChainClient([rpc])
     pair = UniswapV2Pair.from_chain(_pair_address(args.pool), client)
-    token_in = _token_for_symbol(pair, args.token)
-    sizes = _parse_sizes(args.sizes)
+    try:
+        token_in = pair.token_by_symbol(args.token)
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
+    try:
+        sizes = parse_raw_amount_ints(args.sizes)
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
 
     snaps = fetch_sync_snapshots(
         client.w3,

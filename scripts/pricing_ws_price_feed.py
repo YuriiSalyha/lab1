@@ -16,7 +16,6 @@ import asyncio
 import json
 import os
 import sys
-from decimal import Decimal
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -28,6 +27,7 @@ if str(_ROOT) not in sys.path:
 from chain.client import ChainClient  # noqa: E402
 from chain.ws_env import resolve_websocket_url  # noqa: E402
 from core.types import Address  # noqa: E402
+from pricing.raw_amount_list import parse_raw_amount_ints  # noqa: E402
 from pricing.uniswap_v2_pair import UniswapV2Pair  # noqa: E402
 from pricing.v2_pool_price_feed import V2PoolPriceFeed, V2PoolPriceTick  # noqa: E402
 
@@ -41,35 +41,6 @@ def _http_rpc(cli_rpc: str | None) -> str:
         if v:
             return v
     raise SystemExit("Set MAINNET_RPC, ETH_MAINNET_RPC, or RPC_ENDPOINT, or pass --rpc")
-
-
-def _token_for_symbol(pair: UniswapV2Pair, symbol: str):
-    raw = symbol.strip()
-    if not raw:
-        raise SystemExit("--token must be non-empty when using --impact-sizes")
-    key = raw.upper()
-    for t in (pair.token0, pair.token1):
-        if t.symbol.upper() == key:
-            return t
-    if key == "ETH":
-        for t in (pair.token0, pair.token1):
-            if t.symbol.upper() == "WETH":
-                return t
-    opts = f"{pair.token0.symbol}, {pair.token1.symbol}"
-    raise SystemExit(f"Token symbol {raw!r} is not on this pair. Use one of: {opts}")
-
-
-def _parse_impact_sizes(s: str) -> list[int]:
-    out: list[int] = []
-    for part in s.split(","):
-        part = part.strip().replace("_", "")
-        if not part:
-            continue
-        try:
-            out.append(int(Decimal(part)))
-        except Exception as e:
-            raise SystemExit(f"Invalid impact size {part!r} (use integer raw units)") from e
-    return out
 
 
 def _tick_json(tick: V2PoolPriceTick) -> dict:
@@ -101,7 +72,7 @@ def main() -> None:
         "--impact-sizes",
         default=None,
         metavar="RAW_LIST",
-        help="Comma-separated raw amount_in values for price_impact_pct on each tick",
+        help="Raw amount_in values (commas and/or spaces) for price_impact_pct on each tick",
     )
     p.add_argument(
         "--output-format",
@@ -126,10 +97,14 @@ def main() -> None:
     if args.impact_sizes:
         if not args.token:
             raise SystemExit("--token is required when using --impact-sizes")
-        impact_token = _token_for_symbol(pair, args.token)
-        impact_amounts = _parse_impact_sizes(args.impact_sizes)
-        if not impact_amounts:
-            raise SystemExit("--impact-sizes must list at least one positive integer")
+        try:
+            impact_token = pair.token_by_symbol(args.token)
+        except ValueError as e:
+            raise SystemExit(str(e)) from e
+        try:
+            impact_amounts = parse_raw_amount_ints(args.impact_sizes)
+        except ValueError as e:
+            raise SystemExit(str(e)) from e
 
     if args.output_format == "csv":
         hdr = "block,log_index,r0,r1,spot0,spot1"

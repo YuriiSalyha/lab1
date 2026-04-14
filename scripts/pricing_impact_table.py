@@ -9,8 +9,8 @@ Usage (from repo root, with venv activated):
     python scripts/pricing_impact_table.py --rpc URL --pool <pair> --token USDC
 
 ``--pool`` and ``--token`` (ticker you sell, e.g. ``USDC`` / ``WETH``) are required.
-Matching is case-insensitive; ``ETH`` is accepted if the pool has ``WETH``. The printed
-impact column is the absolute adverse percent vs marginal spot.
+Matching is case-insensitive and must match the pair's token symbols (use ``WETH``, not ``ETH``).
+The printed impact column is the absolute adverse percent vs marginal spot.
 
 Requires: MAINNET_RPC / RPC_ENDPOINT / ETH_MAINNET_RPC or ``--rpc``
 """
@@ -31,7 +31,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from chain.client import ChainClient
-from core.types import Address, Token, TokenAmount
+from core.types import Address, TokenAmount
 from pricing.price_impact_analyzer import PriceImpactAnalyzer
 from pricing.uniswap_v2_pair import UniswapV2Pair
 
@@ -46,23 +46,6 @@ def _http_rpc(cli_rpc: str | None) -> str:
         if v:
             return v
     raise SystemExit("Set MAINNET_RPC, ETH_MAINNET_RPC, or RPC_ENDPOINT, or pass --rpc")
-
-
-def _token_in_for_symbol(pair: UniswapV2Pair, symbol: str) -> Token:
-    """Resolve sell-side token by symbol against this pair's token0 / token1."""
-    raw = symbol.strip()
-    if not raw:
-        raise SystemExit("--token must be non-empty")
-    key = raw.upper()
-    for t in (pair.token0, pair.token1):
-        if t.symbol.upper() == key:
-            return t
-    if key == "ETH":
-        for t in (pair.token0, pair.token1):
-            if t.symbol.upper() == "WETH":
-                return t
-    opts = f"{pair.token0.symbol}, {pair.token1.symbol}"
-    raise SystemExit(f"Token symbol {raw!r} is not on this pair. Use one of: {opts}")
 
 
 def _parse_size_human(fragment: str) -> Decimal:
@@ -93,14 +76,17 @@ def main() -> None:
     p.add_argument(
         "--sizes",
         default="0.001,1,100,10000,10_000_000",
-        help="Comma-separated human amounts for the input token (e.g. WETH as ETH units)",
+        help="Comma-separated human amounts for the input token (same units as --token symbol)",
     )
     args = p.parse_args()
 
     rpc = _http_rpc(args.rpc)
     client = ChainClient([rpc])
     pair = UniswapV2Pair.from_chain(Address(args.pool), client)
-    token_in: Token = _token_in_for_symbol(pair, args.token)
+    try:
+        token_in = pair.token_by_symbol(args.token)
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
 
     raw_sizes: list[int] = []
     for part in args.sizes.split(","):
