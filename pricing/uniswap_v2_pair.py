@@ -129,6 +129,23 @@ class UniswapV2Pair:
             fee_bps=self.fee_bps,
         )
 
+    def token_by_symbol(self, symbol: str) -> Token:
+        """
+        Return ``token0`` or ``token1`` whose ``symbol`` matches *symbol* (case-insensitive).
+
+        Used by CLIs for ``--token``; the string must match on-chain metadata (e.g. ``WETH``,
+        not ``ETH``, when the pair lists WETH).
+        """
+        raw = symbol.strip()
+        if not raw:
+            raise ValueError("token symbol must be non-empty")
+        key = raw.upper()
+        for t in (self.token0, self.token1):
+            if t.symbol.upper() == key:
+                return t
+        opts = f"{self.token0.symbol}, {self.token1.symbol}"
+        raise ValueError(f"Token symbol {raw!r} is not on this pair. Use one of: {opts}")
+
     @staticmethod
     def fetch_token_metadata(client: ChainClient, address: Address) -> dict:
         contract = client.w3.eth.contract(

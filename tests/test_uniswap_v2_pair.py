@@ -143,6 +143,16 @@ def test_from_subgraph_row_rejects_zero_reserves() -> None:
     assert UniswapV2Pair.from_subgraph_row(row) is None
 
 
+def test_token_by_symbol_case_insensitive(weth_usdc_pair: UniswapV2Pair) -> None:
+    assert weth_usdc_pair.token_by_symbol("weth") == weth_usdc_pair.token1
+    assert weth_usdc_pair.token_by_symbol("USDC") == weth_usdc_pair.token0
+
+
+def test_token_by_symbol_rejects_eth_alias(weth_usdc_pair: UniswapV2Pair) -> None:
+    with pytest.raises(ValueError, match="not on this pair"):
+        weth_usdc_pair.token_by_symbol("ETH")
+
+
 def test_with_reserves_keeps_tokens_and_fee(weth_usdc_pair: UniswapV2Pair) -> None:
     p2 = weth_usdc_pair.with_reserves(10**12, 10**18)
     assert p2.address == weth_usdc_pair.address
