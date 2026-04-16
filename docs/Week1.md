@@ -107,4 +107,6 @@ Exceptions for RPC, timeouts, node lag, gas estimation, replacement policy, etc.
 
 ## Related docs
 
+- **[Week2.md](Week2.md)** — `pricing` package.
+- **[Week3.md](Week3.md)** — `exchange`, `inventory`, and `scripts.arb_checker`.
 - **[setup.md](setup.md)** — environment, `run.ps1`, lint/tests.

@@ -1,6 +1,6 @@
 # lab1
 
-Python toolkit for **Ethereum account handling**, **JSON-RPC access**, **transaction analysis**, and **Uniswap V2–style pricing** (routing, fork simulation, mempool decoding)—with deterministic JSON utilities, linting, and tests wired for local development.
+Python toolkit for **Ethereum account handling**, **JSON-RPC access**, **transaction analysis**, **Uniswap V2–style pricing** (routing, fork simulation, mempool decoding), **CEX order books** (Binance testnet), **cross-venue inventory**, and an **arb readiness check** (DEX + CEX + inventory)—with deterministic JSON utilities, linting, and tests wired for local development.
 
 ## Features
 
@@ -36,6 +36,24 @@ Python toolkit for **Ethereum account handling**, **JSON-RPC access**, **transac
 
 See **[docs/Week2.md](docs/Week2.md)** for a full package overview. Local fork helper: **`scripts/start_fork.ps1`** (requires [Foundry](https://book.getfoundry.sh/) `anvil`). Optional pytest fork tests: set **`FORK_RPC_URL`** (e.g. `http://127.0.0.1:8545`) and run `pytest -m fork`.
 
+### `exchange/`
+
+- **`ExchangeClient`** — Binance (testnet) via CCXT: **`fetch_order_book`** and **`fetch_balance`** with **`Decimal`** fields, sliding-window **request weight** limiting, optional **IOC limit** orders.
+- **`WeightRateLimiter`** — Binance-style IP weight budget per time window.
+- **`OrderBookAnalyzer` + CLI** — Walk the book for fills / slippage; **`python -m exchange.orderbook`** (or **`.\run.ps1 orderbook ETH/USDT`**).
+
+### `inventory/`
+
+- **`InventoryTracker`** — Balances per **`Venue`** (e.g. Binance vs wallet), **`snapshot`**, **`can_execute`** (both arb legs), **`record_trade`**, **`skew`** / **`get_skews`** for rebalance signals.
+- **`RebalancePlanner`** — Transfer **plans** (fees, min operating balance), **`estimate_cost`**; **`python -m inventory.rebalancer`**.
+- **`PnLEngine`** — **`ArbRecord`** gross/net PnL and bps; **`summary`**, **`export_csv`**; **`python -m inventory.pnl`**.
+
+### `scripts/` — arb check
+
+- **`ArbChecker`** (**`scripts/arb_checker.py`**) — Combines a loaded **Uniswap V2** pool (**`PricingEngine.load_pools`**), **CEX** order book (**`ExchangeClient`**), and **inventory** preflight (**`InventoryTracker`**). Read-only; no trades. Run: **`python -m scripts.arb_checker ETH/USDT --size 2.0`** or **`python scripts/arb_checker.py ...`** (requires **`--rpc`**, **`--pool`** or **`ARB_V2_POOL`**, and Binance config for live balances).
+
+See **[docs/Week3.md](docs/Week3.md)** for **`exchange`**, **`inventory`**, and **`scripts.arb_checker`** in detail.
+
 ## Requirements
 
 - **Python 3.10+**
@@ -55,6 +73,13 @@ First-time setup and macOS/Linux equivalents: **[docs/setup.md](docs/setup.md)**
 .\run.ps1 pricing-impact -- --pool 0x... --token WETH    # + RPC env or --rpc; token = ticker you sell
 .\run.ps1 pricing-route -- --token-in 0x... --token-out 0x... --amount 10000   # optional --pools; --discover fetch|cache + subgraph env
 .\run.ps1 pricing-mempool  # pending Uniswap V2 swaps (needs wss:// in MAINNET_WS / WS_URL)
+.\run.ps1 orderbook ETH/USDT --depth 20   # Binance testnet depth + analysis (needs API keys in .env)
+```
+
+**Arb check (DEX + CEX + inventory)** — set **`MAINNET_RPC`** (or pass **`--rpc`**), a Uniswap V2 **pair** address (**`--pool`** or **`ARB_V2_POOL`**), and Binance testnet keys for balances:
+
+```powershell
+python -m scripts.arb_checker ETH/USDT --size 2.0 --rpc $env:MAINNET_RPC --pool 0xYourV2Pair
 ```
 
 Copy **`.env.example`** → **`.env`** when you need RPC URLs or secrets locally (see setup doc).
@@ -109,14 +134,17 @@ Requires a funded Sepolia wallet (faucet: https://sepoliafaucet.com/). See **[do
 | `core/` | Domain types, wallet, serializer, errors |
 | `chain/` | RPC client, builder, decoder, Uniswap V2 router codec, analyzer CLI |
 | `pricing/` | AMM pairs, routing, price impact, mempool monitor, fork simulator, pricing engine |
-| `tests/` | Pytest suite (`core`, `chain`, `pricing`; optional `-m fork` with `FORK_RPC_URL`) |
-| `scripts/` | Sepolia integration; `start_fork.ps1`; `pricing_impact_table.py`, `pricing_best_route.py`, `pricing_mempool_monitor.py` (see `run.ps1`) |
-| `docs/` | Setup, **[Week1.md](docs/Week1.md)** (`core`/`chain`), **[Week2.md](docs/Week2.md)** (`pricing`) |
+| `exchange/` | Binance (testnet) client, rate limiter, order book analyzer CLI |
+| `inventory/` | Cross-venue tracker, rebalance planner, PnL engine |
+| `config/` | Shared config (e.g. `BINANCE_CONFIG` from env) |
+| `tests/` | Pytest suite (`core`, `chain`, `pricing`, `exchange`, `inventory`, `scripts.arb_checker`) |
+| `scripts/` | Sepolia integration; `start_fork.ps1`; pricing CLIs; **`arb_checker.py`** (DEX + CEX + inventory) |
+| `docs/` | Setup, **[Week1.md](docs/Week1.md)**, **[Week2.md](docs/Week2.md)**, **[Week3.md](docs/Week3.md)** |
 
 ## Tooling
 
 - **[Ruff](https://docs.astral.sh/ruff/)** — Lint (and optional format); config in `pyproject.toml`.
-- **[pytest](https://pytest.org/)** — Tests; `pythonpath` includes the repo root for `import core` / `import chain` / `import pricing`.
+- **[pytest](https://pytest.org/)** — Tests; `pythonpath` includes the repo root for `import core` / `import chain` / `import pricing` / `import exchange` / `import inventory` / `import scripts`.
 - **Pre-commit** — Hooks in `.pre-commit-config.yaml` (includes **`detect-private-key`**). Run after clone: `.\run.ps1 install` or `pre-commit install` inside the venv.
 
 ## Why `run.ps1`?
