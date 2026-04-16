@@ -8,6 +8,7 @@ name = "lab1"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
+    "ccxt", # Cryptocurrency exchange API
     "python-dotenv", # For secrets management
     "eth-account", # For signing messages and transactions
     "web3>=6.0.0", # For Ethereum RPC and ABI interaction
@@ -36,6 +37,7 @@ select = ["E", "F", "I", "B"]
 "scripts/pricing_best_route.py" = ["E402", "I001"]
 "scripts/pricing_mempool_monitor.py" = ["E402", "I001"]
 "scripts/pricing_arbitrage_scan.py" = ["E402", "I001"]
+"scripts/arb_checker.py" = ["E402", "I001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -52,4 +54,4 @@ filterwarnings = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "chain*", "pricing*"]
+include = ["core*", "chain*", "pricing*", "exchange*", "inventory*", "integration*"]
