@@ -54,4 +54,4 @@ filterwarnings = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "chain*", "pricing*", "exchange*", "inventory*", "integration*"]
+include = ["core*", "chain*", "pricing*", "exchange*", "inventory*", "scripts*"]
