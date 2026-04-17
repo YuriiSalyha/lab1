@@ -112,4 +112,5 @@ This document summarizes what the **`pricing`** package provides, how modules fi
 ## Related docs
 
 - **[Week1.md](Week1.md)** — `core` and `chain` foundations.
+- **[Week3.md](Week3.md)** — `exchange`, `inventory`, and `scripts.arb_checker` (ArbChecker).
 - **[setup.md](setup.md)** — environment, `run.ps1`, lint/tests, RPC variables.

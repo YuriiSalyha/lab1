@@ -43,8 +43,18 @@ Tests use `load_dotenv()`; the current suite does not require `.env` to pass.
 | Mempool Uniswap V2 swaps | `.\run.ps1 pricing-mempool` — needs `MAINNET_WS` / `WS_URL` / `ALCHEMY_WS` or `--ws` (`wss://...`) |
 | V2 live price feed (Sync logs) | `.\run.ps1 pricing-ws-feed -- --pool 0x...` — HTTP RPC for metadata + same WebSocket env as mempool |
 | Historical V2 price impact | `.\run.ps1 pricing-history-impact -- --pool 0x... --from-block N --to-block M --token WETH --sizes 1e18` — **archive** HTTP RPC for old blocks |
+| Binance testnet order book | `.\run.ps1 orderbook ETH/USDT --depth 20` — needs Binance testnet API keys in `.env` |
+| Arb check (DEX + CEX + inventory) | `python -m scripts.arb_checker ETH/USDT --size 2.0 --rpc https://... --pool 0x...` — see **[Week3.md](Week3.md)** |
 
 Direct Python (from repo root, venv on): `python scripts/pricing_impact_table.py --help`, etc.
+
+### Package overviews
+
+| Doc | Contents |
+|-----|----------|
+| **[Week1.md](Week1.md)** | `core`, `chain` |
+| **[Week2.md](Week2.md)** | `pricing` |
+| **[Week3.md](Week3.md)** | `exchange`, `inventory`, `scripts.arb_checker` |
 
 ### WebSocket vs HTTP for pricing scripts
 
