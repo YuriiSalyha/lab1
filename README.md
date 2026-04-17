@@ -52,7 +52,57 @@ See **[docs/Week2.md](docs/Week2.md)** for a full package overview. Local fork h
 
 - **`ArbChecker`** (**`scripts/arb_checker.py`**) — Combines a loaded **Uniswap V2** pool (**`PricingEngine.load_pools`**), **CEX** order book (**`ExchangeClient`**), and **inventory** preflight (**`InventoryTracker`**). Read-only; no trades. Run: **`python -m scripts.arb_checker ETH/USDT --size 2.0`** or **`python scripts/arb_checker.py ...`** (requires **`--rpc`**, **`--pool`** or **`ARB_V2_POOL`**, and Binance config for live balances).
 
-See **[docs/Week3.md](docs/Week3.md)** for **`exchange`**, **`inventory`**, and **`scripts.arb_checker`** in detail.
+See **[docs/Week3.md](docs/Week3.md)** for **`exchange`**, **`inventory`**, **`scripts.arb_checker`**, and CLI examples (order book, IOC trades, snapshots, arb checker, PnL). Quick PnL demo: `python scripts/pnl_demo.py`.
+
+## Architecture
+
+Modules interact roughly as follows (arrows show primary data flow for the arb workflow):
+
+```mermaid
+flowchart LR
+  subgraph chain_pricing [Chain and pricing]
+    CC[ChainClient]
+    PE[PricingEngine]
+    UV[UniswapV2Pair]
+    CC --> PE
+    PE --> UV
+  end
+  subgraph cex [Centralized exchange]
+    EC[ExchangeClient]
+    OB[OrderBookAnalyzer]
+    EC --> OB
+  end
+  subgraph inv [Inventory]
+    IT[InventoryTracker]
+    PN[PnLEngine]
+  end
+  AC[ArbChecker scripts.arb_checker]
+  UV --> AC
+  EC --> AC
+  IT --> AC
+  EC -.-> IT
+```
+
+- **`ArbChecker`** reads **DEX** prices from pools loaded on **`PricingEngine`**, **CEX** quotes from **`ExchangeClient`**, and checks **`InventoryTracker.can_execute`** for both legs.
+- **`RebalancePlanner`** and **`PnLEngine`** are separate; they use the same **`inventory`** types for skew and recorded trade economics.
+
+## Definition of done checklist
+
+| Requirement | Notes |
+|-------------|--------|
+| `ExchangeClient` connects to Binance testnet and fetches order books | Covered by **`tests/test_exchange_client.py`** (`test_integration_connects_and_fetches_order_book`, mocked unit tests). |
+| `ExchangeClient` places and cancels LIMIT IOC orders | **`test_integration_limit_ioc_place_and_cancel`** + **`create_limit_ioc_order`** / **`cancel_order`**. |
+| Rate limiter prevents API ban | **`WeightRateLimiter`**, **`test_rate_limiter_blocks_when_exhausted`**, **`test_integration_rate_limiter_does_not_break_live_client`**. |
+| `OrderBookAnalyzer.walk_the_book` simulates fills | **`tests/test_orderbook.py`** (exact fill, multi-level, insufficient liquidity). |
+| `OrderBookAnalyzer` CLI shows depth, spread, imbalance | **`exchange/orderbook.py`** CLI; **`run.ps1 orderbook`**. |
+| `InventoryTracker` aggregates balances | **`test_snapshot_aggregates_across_venues`**. |
+| `InventoryTracker.can_execute` validates both legs | **`test_can_execute_*`**. |
+| `InventoryTracker.skew` detects imbalance | Skew / 60-40 / 90-10 tests in **`tests/test_inventory.py`**. |
+| `RebalancePlanner` valid plans + min operating balance | **`test_plan_*`**, **`test_plan_respects_min_operating_balance`**. |
+| `PnLEngine` per-trade and aggregate PnL | **`test_gross_pnl_*`**, **`test_summary_*`**, **`test_pnl_mixed_eth_and_usdt_fee_assets`**. |
+| `ArbChecker` integrates pricing + exchange + inventory | **`tests/test_arb_checker.py`** (profitable / unprofitable / inventory). |
+| At least 25 tests for exchange + orderbook + inventory + arb | **`tests/test_exchange_client.py`** (12) + **`test_orderbook.py`** (8) + **`test_inventory.py`** (24) + **`test_arb_checker.py`** (5) = **49** tests in those files. |
+| README architecture diagram | This section. |
 
 ## Requirements
 

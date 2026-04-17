@@ -31,21 +31,27 @@ def eth_usdt_pool() -> UniswapV2Pair:
     )
 
 
-@pytest.fixture
-def mock_exchange() -> MagicMock:
+def _exchange_mock(bid: Decimal, ask: Decimal) -> MagicMock:
     ex = MagicMock(spec=ExchangeClient)
+    mid = (bid + ask) / Decimal("2")
+    spread_bps = (ask - bid) / mid * Decimal("10000") if mid > 0 else Decimal("0")
     ex.fetch_order_book.return_value = {
         "symbol": "ETH/USDT",
         "timestamp": 1,
         "bids": [],
         "asks": [],
-        "best_bid": (Decimal("2015"), Decimal("100")),
-        "best_ask": (Decimal("2016"), Decimal("100")),
-        "mid_price": Decimal("2015.5"),
-        "spread_bps": Decimal("5"),
+        "best_bid": (bid, Decimal("100")),
+        "best_ask": (ask, Decimal("100")),
+        "mid_price": mid,
+        "spread_bps": spread_bps,
     }
     ex._validate_symbol = ExchangeClient._validate_symbol
     return ex
+
+
+@pytest.fixture
+def mock_exchange() -> MagicMock:
+    return _exchange_mock(Decimal("2015"), Decimal("2016"))
 
 
 def test_check_returns_expected_keys(eth_usdt_pool, mock_exchange):
@@ -88,3 +94,36 @@ def test_inventory_fail_marks_not_executable(eth_usdt_pool, mock_exchange):
     r = ac.check("ETH/USDT", Decimal("2"))
     assert r["inventory_ok"] is False
     assert r["executable"] is False
+
+
+def test_integration_executable_when_profitable_and_inventory_ok(eth_usdt_pool):
+    """Wide CEX bid vs DEX → positive net bps; both legs funded → executable."""
+    ex = _exchange_mock(Decimal("50000"), Decimal("50001"))
+    pe = SimpleNamespace(pools={PAIR_ADDR: eth_usdt_pool})
+    tr = InventoryTracker([Venue.BINANCE, Venue.WALLET])
+    tr.update_from_cex(Venue.BINANCE, {"ETH": {"free": Decimal("50"), "locked": Decimal("0")}})
+    tr.update_from_wallet(Venue.WALLET, {"USDT": Decimal("500_000")})
+    ac = ArbChecker(
+        pe,
+        ex,
+        tr,
+        None,
+        default_gas_cost_usd=Decimal("0"),
+    )
+    r = ac.check("ETH/USDT", Decimal("1"))
+    assert r["estimated_net_pnl_bps"] > 0
+    assert r["inventory_ok"] is True
+    assert r["executable"] is True
+
+
+def test_integration_rejects_when_edge_negative(eth_usdt_pool):
+    """Bid too low for buy-DEX path; ask too high for buy-CEX path → both nets negative."""
+    ex = _exchange_mock(Decimal("500"), Decimal("100000"))
+    pe = SimpleNamespace(pools={PAIR_ADDR: eth_usdt_pool})
+    tr = InventoryTracker([Venue.BINANCE, Venue.WALLET])
+    tr.update_from_cex(Venue.BINANCE, {"ETH": {"free": Decimal("10"), "locked": Decimal("0")}})
+    tr.update_from_wallet(Venue.WALLET, {"USDT": Decimal("50000")})
+    ac = ArbChecker(pe, ex, tr, None, default_gas_cost_usd=Decimal("0"))
+    r = ac.check("ETH/USDT", Decimal("1"))
+    assert r["executable"] is False
+    assert r["estimated_net_pnl_bps"] <= 0

@@ -137,6 +137,23 @@ def test_skew_balanced(tracker):
     assert s["needs_rebalance"] is False
 
 
+def test_skew_moderate_60_40_no_rebalance(tracker):
+    """60/40 vs 50/50 — deviation below default 30% rebalance threshold."""
+    tracker.update_from_cex(Venue.BINANCE, _cex_bal("ETH", "6"))
+    tracker.update_from_wallet(Venue.WALLET, {"ETH": Decimal("4")})
+    s = tracker.skew("ETH")
+    assert s["max_deviation_pct"] < 30
+    assert s["needs_rebalance"] is False
+
+
+def test_skew_extreme_90_10_needs_rebalance(tracker):
+    """90/10 split exceeds threshold."""
+    tracker.update_from_cex(Venue.BINANCE, _cex_bal("ETH", "1"))
+    tracker.update_from_wallet(Venue.WALLET, {"ETH": Decimal("9")})
+    s = tracker.skew("ETH")
+    assert s["needs_rebalance"] is True
+
+
 def test_get_skews_returns_all_assets(tracker):
     """get_skews() returns one entry per tracked asset."""
     tracker.update_from_cex(Venue.BINANCE, _cex_bal("ETH", "1"))
@@ -275,6 +292,21 @@ def test_net_pnl_includes_all_fees():
         gas_cost_usd=Decimal("2"),
     )
     assert r.net_pnl == r.gross_pnl - Decimal("22")  # 10 + 10 + 2 gas
+
+
+def test_pnl_mixed_eth_and_usdt_fee_assets():
+    """ETH fee leg priced in USD via REFERENCE_USD_PER_ETH; stables at 1:1."""
+    buy = _leg("b", Venue.BINANCE, "buy", "1", "2000", "0.001", "ETH")
+    sell = _leg("s", Venue.WALLET, "sell", "1", "2100", "3", "USDT")
+    r = ArbRecord(
+        id="mix",
+        timestamp=buy.timestamp,
+        buy_leg=buy,
+        sell_leg=sell,
+        gas_cost_usd=Decimal("1"),
+    )
+    # 0.001 ETH * 2000 + 3 USDT + 1 gas
+    assert r.total_fees == Decimal("2") + Decimal("3") + Decimal("1")
 
 
 def test_pnl_bps_calculation():
