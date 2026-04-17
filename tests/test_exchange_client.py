@@ -9,12 +9,17 @@ from __future__ import annotations
 
 import os
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from dotenv import load_dotenv
 
 from exchange.client import ExchangeClient, orderbook_request_weight
 from exchange.rate_limiter import WeightRateLimiter
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(_REPO_ROOT / ".env")
 
 
 @pytest.fixture
@@ -201,10 +206,12 @@ def test_integration_limit_ioc_place_and_cancel():
     then place a far-from-market GTC-style limit (day) and cancel it to
     exercise the cancel path on testnet.
     """
-    key = os.getenv("BINANCE_TESTNET_API_KEY")
-    sec = os.getenv("BINANCE_TESTNET_SECRET")
+    key = (os.getenv("BINANCE_TESTNET_API_KEY") or "").strip()
+    sec = (os.getenv("BINANCE_TESTNET_SECRET") or "").strip()
     if not key or not sec:
-        pytest.skip("BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_SECRET not set")
+        pytest.skip(
+            "BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_SECRET not set (use .env in repo root)",
+        )
 
     cfg = {
         "apiKey": key,
@@ -213,35 +220,37 @@ def test_integration_limit_ioc_place_and_cancel():
         "options": {"defaultType": "spot"},
         "enableRateLimit": True,
     }
+    sym = "ETH/USDT"
     try:
         client = ExchangeClient(cfg)
-        ob = client.fetch_order_book("ETH/USDT", limit=5)
+        xc = client.client
+        xc.load_markets()
+        ob = client.fetch_order_book(sym, limit=5)
         best_bid = ob["best_bid"][0]
         best_ask = ob["best_ask"][0]
-        # IOC buy far below market — should not fill
-        ioc = client.create_limit_ioc_order(
-            "ETH/USDT",
-            "buy",
-            0.001,
-            float(best_bid * Decimal("0.01")),
-        )
+        # Sizes/prices must pass Binance MIN_NOTIONAL (tiny IOC notionals used to fail here).
+        amt = float(xc.amount_to_precision(sym, 0.01))
+        ioc_px = float(xc.price_to_precision(sym, float(best_bid * Decimal("0.5"))))
+        gtc_px = float(xc.price_to_precision(sym, float(best_ask * Decimal("0.5"))))
+        # IOC buy well below ask — should not fill; notional still meaningful vs filters.
+        ioc = client.create_limit_ioc_order(sym, "buy", amt, ioc_px)
         assert ioc["id"]
         assert isinstance(ioc["amount_requested"], Decimal)
 
         # Resting limit order we can cancel (GTC default on Binance spot limit)
-        raw = client.client.create_order(
-            "ETH/USDT",
+        raw = xc.create_order(
+            sym,
             "limit",
             "buy",
-            0.001,
-            float(best_ask * Decimal("0.1")),
+            amt,
+            gtc_px,
             {"timeInForce": "GTC"},
         )
         oid = str(raw["id"])
-        canceled = client.cancel_order(oid, "ETH/USDT")
+        canceled = client.cancel_order(oid, sym)
         assert str(canceled["id"]) == str(oid)
     except Exception as e:
-        pytest.skip(f"testnet trading test skipped: {e}")
+        pytest.skip(f"testnet trading skipped ({type(e).__name__}): {e}")
 
 
 @pytest.mark.integration

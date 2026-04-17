@@ -10,6 +10,10 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from dotenv import load_dotenv
 
 from core.types import Address, Token, TokenAmount
@@ -25,8 +29,6 @@ DEFAULT_CEX_TAKER_FEE_BPS = Decimal("10")
 DEFAULT_CEX_SLIPPAGE_BPS = Decimal("0.4")
 DEFAULT_GAS_COST_USD = Decimal("5")
 ORDERBOOK_LIMIT = 50
-
-_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ArbCheckError(Exception):
@@ -354,9 +356,6 @@ def _print_report(result: dict, size_base: Decimal, pair: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    if str(Path.cwd()) not in sys.path:
-        sys.path.insert(0, str(_repo_root()))
-
     p = argparse.ArgumentParser(description="Arbitrage check (DEX + Binance + inventory)")
     p.add_argument("pair", help="Unified symbol e.g. ETH/USDT")
     p.add_argument("--size", type=str, required=True, help="Trade size in base asset, e.g. 2.0")

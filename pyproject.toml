@@ -39,6 +39,7 @@ select = ["E", "F", "I", "B"]
 "scripts/pricing_arbitrage_scan.py" = ["E402", "I001"]
 "scripts/arb_checker.py" = ["E402", "I001"]
 "scripts/pnl_demo.py" = ["E402", "I001"]
+"scripts/portfolio_snapshot.py" = ["E402", "I001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
