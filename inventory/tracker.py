@@ -10,6 +10,7 @@ DEFAULT_REBALANCE_DEVIATION_THRESHOLD_PCT = 30.0
 
 class Venue(str, Enum):
     BINANCE = "binance"
+    BYBIT = "bybit"
     WALLET = "wallet"  # On-chain wallet (DEX venue)
 
 

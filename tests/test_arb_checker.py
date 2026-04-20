@@ -72,6 +72,7 @@ def test_check_returns_expected_keys(eth_usdt_pool, mock_exchange):
     assert "estimated_net_pnl_bps" in r
     assert "inventory_ok" in r
     assert "executable" in r
+    assert r.get("cex_venue") == "binance"
     assert "dex_fee_bps" in r["details"]
     assert "gas_cost_usd" in r["details"]
 
@@ -127,3 +128,13 @@ def test_integration_rejects_when_edge_negative(eth_usdt_pool):
     r = ac.check("ETH/USDT", Decimal("1"))
     assert r["executable"] is False
     assert r["estimated_net_pnl_bps"] <= 0
+
+
+def test_bybit_venue_inventory_leg(eth_usdt_pool, mock_exchange):
+    tr = InventoryTracker([Venue.BYBIT, Venue.WALLET])
+    tr.update_from_cex(Venue.BYBIT, {"ETH": {"free": Decimal("10"), "locked": Decimal("0")}})
+    tr.update_from_wallet(Venue.WALLET, {"USDT": Decimal("50000")})
+    pe = SimpleNamespace(pools={PAIR_ADDR: eth_usdt_pool})
+    ac = ArbChecker(pe, mock_exchange, tr, None, cex_venue=Venue.BYBIT)
+    r = ac.check("ETH/USDT", Decimal("1"))
+    assert r["cex_venue"] == "bybit"

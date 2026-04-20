@@ -92,6 +92,7 @@ class ArbChecker:
         inventory_tracker: InventoryTracker,
         pnl_engine: PnLEngine | None = None,
         *,
+        cex_venue: Venue = Venue.BINANCE,
         cex_taker_fee_bps: Decimal | None = None,
         cex_slippage_bps: Decimal | None = None,
         default_gas_cost_usd: Decimal | None = None,
@@ -100,6 +101,7 @@ class ArbChecker:
         self._exchange = exchange_client
         self._inventory = inventory_tracker
         self._pnl = pnl_engine
+        self._cex_venue = cex_venue
         self._cex_fee_bps = (
             cex_taker_fee_bps if cex_taker_fee_bps is not None else DEFAULT_CEX_TAKER_FEE_BPS
         )
@@ -177,7 +179,7 @@ class ArbChecker:
             Venue.WALLET,
             quote_sym,
             quote_in_human,
-            Venue.BINANCE,
+            self._cex_venue,
             base_sym,
             size_base,
         )
@@ -195,7 +197,7 @@ class ArbChecker:
 
         cex_buy_cost = best_ask * size_base
         inv_sell = self._inventory.can_execute(
-            Venue.BINANCE,
+            self._cex_venue,
             quote_sym,
             cex_buy_cost,
             Venue.WALLET,
@@ -236,6 +238,7 @@ class ArbChecker:
             "dex_price": dex_price,
             "cex_bid": best_bid,
             "cex_ask": best_ask,
+            "cex_venue": self._cex_venue.value,
             "gap_bps": gap_bps,
             "direction": direction,
             "estimated_costs_bps": estimated_costs_bps,
@@ -289,6 +292,7 @@ def _pool_from_env(cli_pool: str | None) -> str:
 def _print_report(result: dict, size_base: Decimal, pair: str) -> None:
     base = pair.split("/")[0]
     quote = pair.split("/")[1]
+    cex_label = str(result.get("cex_venue", "binance")).upper()
     d = result["details"]
     print()
     print("═" * 43)
@@ -299,8 +303,8 @@ def _print_report(result: dict, size_base: Decimal, pair: str) -> None:
     print(f"  Uniswap V2:      ${result['dex_price']:.2f} (buy {size_base} {base})")
     if result["direction"] == "buy_cex_sell_dex":
         print(f"  Uniswap V2 (sell): ${result['dex_price']:.2f} revenue for {size_base} {base}")
-    print(f"  Binance bid:      ${result['cex_bid']:.2f}")
-    print(f"  Binance ask:      ${result['cex_ask']:.2f}")
+    print(f"  {cex_label} bid:      ${result['cex_bid']:.2f}")
+    print(f"  {cex_label} ask:      ${result['cex_ask']:.2f}")
     print()
     gap = result["gap_bps"]
     print(f"Gap: {gap:.1f} bps (direction: {result['direction']})")
@@ -328,13 +332,13 @@ def _print_report(result: dict, size_base: Decimal, pair: str) -> None:
             f"(need ~{need_q:.0f}) {'OK' if ic['can_execute'] else 'NO'}"
         )
         print(
-            f"  Binance {base}:   {ic['sell_venue_available']:.1f}   "
+            f"  {cex_label} {base}:   {ic['sell_venue_available']:.1f}   "
             f"(need {size_base})    {'OK' if ic['can_execute'] else 'NO'}"
         )
     else:
         print("Inventory:")
         print(
-            f"  Binance {quote}:  {ic['buy_venue_available']:.0f} "
+            f"  {cex_label} {quote}:  {ic['buy_venue_available']:.0f} "
             f"(need ~{d.get('cex_buy_cost_usd', 0):.0f}) {'OK' if ic['can_execute'] else 'NO'}"
         )
         print(
@@ -356,16 +360,22 @@ def _print_report(result: dict, size_base: Decimal, pair: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(description="Arbitrage check (DEX + Binance + inventory)")
+    p = argparse.ArgumentParser(description="Arbitrage check (DEX + CEX + inventory)")
     p.add_argument("pair", help="Unified symbol e.g. ETH/USDT")
     p.add_argument("--size", type=str, required=True, help="Trade size in base asset, e.g. 2.0")
     p.add_argument("--rpc", default=None, help="Ethereum HTTP RPC (or MAINNET_RPC env)")
     p.add_argument("--pool", default=None, help="Uniswap V2 pair address (or ARB_V2_POOL env)")
     p.add_argument("--gas-usd", type=str, default=None, help="Gas estimate in USD")
+    p.add_argument(
+        "--cex",
+        default="binance",
+        choices=("binance", "bybit"),
+        help="CEX venue for order book + inventory leg (default binance)",
+    )
     args = p.parse_args(argv)
 
     from chain.client import ChainClient
-    from config.config import BINANCE_CONFIG
+    from config.config import BINANCE_CONFIG, BYBIT_CONFIG
 
     rpc = _rpc_from_env(args.rpc)
     pool_hex = _pool_from_env(args.pool)
@@ -378,15 +388,17 @@ def main(argv: list[str] | None = None) -> None:
     engine = PricingEngine(chain, fork_url, ws_url, quote_sender)
     engine.load_pools([Address.from_string(pool_hex)])
 
-    xc = ExchangeClient(BINANCE_CONFIG)
-    tracker = InventoryTracker([Venue.BINANCE, Venue.WALLET])
+    cex_venue = Venue(args.cex)
+    cfg = BYBIT_CONFIG if cex_venue == Venue.BYBIT else BINANCE_CONFIG
+    xc = ExchangeClient(cfg, exchange_id=cex_venue.value)
+    tracker = InventoryTracker([cex_venue, Venue.WALLET])
     try:
         bal = xc.fetch_balance()
-        tracker.update_from_cex(Venue.BINANCE, bal)
+        tracker.update_from_cex(cex_venue, bal)
     except Exception:
         pass
     pnl = PnLEngine()
-    checker = ArbChecker(engine, xc, tracker, pnl)
+    checker = ArbChecker(engine, xc, tracker, pnl, cex_venue=cex_venue)
     gas_usd = Decimal(args.gas_usd) if args.gas_usd else None
     result = checker.check(args.pair, size_base, gas_cost_usd=gas_usd)
     _print_report(result, size_base, args.pair.upper())

@@ -9,6 +9,8 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "ccxt", # Cryptocurrency exchange API
+    "rich>=13.0.0", # Terminal dashboard (Live / Table)
+    "websockets>=12.0", # CEX order book WebSocket streams (explicit; not only via web3)
     "python-dotenv", # For secrets management
     "eth-account", # For signing messages and transactions
     "web3>=6.0.0", # For Ethereum RPC and ABI interaction
@@ -21,6 +23,10 @@ dev = [
     "pytest>=7.0.0",
     "ruff>=0.3.0",
     "pre-commit>=3.0.0",
+]
+viz = [
+    "matplotlib>=3.8.0",
+    "plotly>=5.18.0",
 ]
 
 [tool.ruff]
@@ -39,6 +45,8 @@ select = ["E", "F", "I", "B"]
 "scripts/pricing_arbitrage_scan.py" = ["E402", "I001"]
 "scripts/arb_checker.py" = ["E402", "I001"]
 "scripts/pnl_demo.py" = ["E402", "I001"]
+"scripts/inventory_dashboard.py" = ["E402", "I001"]
+"scripts/orderbook_ws_stream.py" = ["E402", "I001"]
 "scripts/portfolio_snapshot.py" = ["E402", "I001"]
 
 [tool.pytest.ini_options]
