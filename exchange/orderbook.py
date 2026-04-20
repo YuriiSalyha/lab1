@@ -392,18 +392,25 @@ def main(argv: list[str] | None = None) -> int:
         default="2,10",
         help="Comma-separated base sizes for walk-the-book (default 2,10)",
     )
+    parser.add_argument(
+        "--exchange",
+        default="binance",
+        choices=("binance", "bybit"),
+        help="CCXT exchange id (default binance)",
+    )
     args = parser.parse_args(argv)
 
     try:
-        from config.config import BINANCE_CONFIG
+        from config.config import BINANCE_CONFIG, BYBIT_CONFIG
         from exchange.client import ExchangeClient
     except ImportError as e:
         print(f"Import error: {e}", file=sys.stderr)
         return 1
 
-    cfg = copy.deepcopy(BINANCE_CONFIG)
+    base_cfg = BYBIT_CONFIG if args.exchange == "bybit" else BINANCE_CONFIG
+    cfg = copy.deepcopy(base_cfg)
     try:
-        client = ExchangeClient(cfg)
+        client = ExchangeClient(cfg, exchange_id=args.exchange)
         ob = client.fetch_order_book(args.symbol, limit=args.depth)
     except Exception as e:
         print(f"Failed to fetch order book: {e}", file=sys.stderr)

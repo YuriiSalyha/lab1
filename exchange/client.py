@@ -1,6 +1,6 @@
 """
-CCXT Binance (testnet) client with weight-based rate limiting, logging, and
-normalized Decimal outputs for monetary fields.
+CCXT spot exchange client (Binance / Bybit testnet) with weight-based rate limiting,
+logging, and normalized Decimal outputs for monetary fields.
 """
 
 from __future__ import annotations
@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
+# Allowlisted ccxt exchange ids (lowercase constructor names).
+SUPPORTED_CCXT_IDS = frozenset({"binance", "bybit"})
+
+# Non-Binance exchanges: conservative fixed weight for local rate limiter (no Binance IP headers).
+BYBIT_FETCH_ORDERBOOK_WEIGHT = 1
+
 # Binance spot GET /api/v3/depth weight by limit (approximate; see Binance API docs).
 _ORDERBOOK_WEIGHT_BY_LIMIT = (
     (100, 5),
@@ -45,9 +51,18 @@ def orderbook_request_weight(limit: int) -> int:
     return 250
 
 
+def orderbook_request_weight_for_exchange(exchange_id: str, limit: int) -> int:
+    """REST weight for ``fetch_order_book`` (Binance table; other venues use a fixed weight)."""
+    if exchange_id == "binance":
+        return orderbook_request_weight(limit)
+    if exchange_id in SUPPORTED_CCXT_IDS:
+        return BYBIT_FETCH_ORDERBOOK_WEIGHT
+    raise ValueError(f"unsupported exchange_id: {exchange_id!r}")
+
+
 class ExchangeClient:
     """
-    Wrapper around ccxt for Binance testnet.
+    Wrapper around ccxt (Binance / Bybit spot testnet by default).
     Handles rate limiting, error handling, and response normalization.
     """
 
@@ -55,11 +70,14 @@ class ExchangeClient:
         self,
         config: dict,
         *,
+        exchange_id: str = "binance",
         rate_limit_max_weight: int | None = None,
         rate_limit_window_sec: float | None = None,
     ) -> None:
         """
         Initialize with CCXT config (apiKey, secret, sandbox, options, ...).
+
+        ``exchange_id``: ``"binance"`` or ``"bybit"`` (see ``SUPPORTED_CCXT_IDS``).
 
         Optional keys in ``config``:
 
@@ -69,6 +87,12 @@ class ExchangeClient:
 
         Constructor keyword arguments override those keys.
         """
+        eid = exchange_id.lower().strip()
+        if eid not in SUPPORTED_CCXT_IDS:
+            raise ValueError(
+                f"exchange_id must be one of {sorted(SUPPORTED_CCXT_IDS)}, got {exchange_id!r}",
+            )
+
         cfg = copy.deepcopy(config)
         max_w = rate_limit_max_weight
         if max_w is None:
@@ -77,13 +101,19 @@ class ExchangeClient:
         if win is None:
             win = float(cfg.pop("rateLimitWindowSec", 60.0))
 
-        self.client = ccxt.binance(cfg)
+        factory = getattr(ccxt, eid)
+        self._exchange_id = eid
+        self.client = factory(cfg)
         self.client.enableRateLimit = True
         self.client.enableLastResponseHeaders = True
 
         self._rate_limiter = WeightRateLimiter(max_weight=max_w, window_sec=win)
 
         self._health_check()
+
+    @property
+    def exchange_id(self) -> str:
+        return self._exchange_id
 
     @staticmethod
     def to_decimal(v: Any) -> Decimal:
@@ -248,7 +278,7 @@ class ExchangeClient:
         if not isinstance(limit, int) or limit < 1 or limit > 5000:
             raise ValueError("limit must be an int between 1 and 5000")
 
-        w = orderbook_request_weight(limit)
+        w = orderbook_request_weight_for_exchange(self._exchange_id, limit)
         raw = self._ccxt_request(
             "fetch_order_book",
             w,
@@ -281,6 +311,16 @@ class ExchangeClient:
                 # Full spread as basis points of mid: (ask − bid) / mid × 10_000
                 spread_bps = (ap - bp) / mid_price * Decimal("10000")
 
+        nonce = raw.get("nonce")
+        last_update_id: int | None
+        if nonce is None:
+            last_update_id = None
+        else:
+            try:
+                last_update_id = int(nonce)
+            except (TypeError, ValueError):
+                last_update_id = None
+
         return {
             "symbol": raw.get("symbol", symbol),
             "timestamp": raw.get("timestamp"),
@@ -290,6 +330,9 @@ class ExchangeClient:
             "best_ask": best_ask,
             "mid_price": mid_price,
             "spread_bps": spread_bps,
+            # WebSocket sync: sequence when ccxt exposes it (e.g. Binance lastUpdateId).
+            "last_update_id": last_update_id,
+            "nonce": nonce,
         }
 
     def fetch_balance(self) -> dict[str, dict]:

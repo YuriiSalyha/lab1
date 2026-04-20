@@ -15,7 +15,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from dotenv import load_dotenv
 
-from exchange.client import ExchangeClient, orderbook_request_weight
+from exchange.client import (
+    ExchangeClient,
+    orderbook_request_weight,
+    orderbook_request_weight_for_exchange,
+)
 from exchange.rate_limiter import WeightRateLimiter
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +65,8 @@ def test_fetch_order_book_structure(client, mock_ccxt_binance):
         "best_ask",
         "mid_price",
         "spread_bps",
+        "last_update_id",
+        "nonce",
     }
     assert isinstance(ob["bids"][0][0], Decimal)
     assert isinstance(ob["asks"][0][0], Decimal)
@@ -172,6 +178,40 @@ def test_invalid_symbol_raises():
 def test_orderbook_weight_brackets():
     assert orderbook_request_weight(50) == 5
     assert orderbook_request_weight(200) == 25
+
+
+def test_orderbook_weight_for_exchange_bybit():
+    assert orderbook_request_weight_for_exchange("bybit", 500) == 1
+
+
+def test_exchange_id_rejected():
+    with pytest.raises(ValueError, match="exchange_id"):
+        ExchangeClient({}, exchange_id="kraken")
+
+
+@pytest.fixture
+def mock_ccxt_bybit():
+    ex = MagicMock()
+    ex.fetch_time.return_value = 1_700_000_000_000
+    ex.enableRateLimit = True
+    ex.enableLastResponseHeaders = True
+    ex.last_response_headers = {}
+    return ex
+
+
+def test_bybit_client_order_book(mock_ccxt_bybit):
+    with patch("exchange.client.ccxt.bybit", return_value=mock_ccxt_bybit):
+        c = ExchangeClient({"apiKey": "x", "secret": "y"}, exchange_id="bybit")
+        mock_ccxt_bybit.fetch_order_book.return_value = {
+            "symbol": "ETH/USDT",
+            "timestamp": 1,
+            "nonce": 42,
+            "bids": [[100.0, 1.0]],
+            "asks": [[101.0, 1.0]],
+        }
+        ob = c.fetch_order_book("ETH/USDT", 20)
+        assert ob["last_update_id"] == 42
+        assert c.exchange_id == "bybit"
 
 
 # --- Integration (Binance testnet) ---
