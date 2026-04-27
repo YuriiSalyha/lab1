@@ -28,6 +28,9 @@ viz = [
     "matplotlib>=3.8.0",
     "plotly>=5.18.0",
 ]
+metrics = [
+    "prometheus-client>=0.20.0",
+]
 
 [tool.ruff]
 line-length = 100
@@ -64,4 +67,14 @@ filterwarnings = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "chain*", "pricing*", "exchange*", "inventory*", "scripts*"]
+include = [
+    "core*",
+    "chain*",
+    "pricing*",
+    "exchange*",
+    "inventory*",
+    "executor*",
+    "strategy*",
+    "monitoring*",
+    "scripts*",
+]

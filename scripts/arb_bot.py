@@ -10,8 +10,12 @@ Run modes:
     each success, prints a PnL summary, then **exits** (no infinite loop).
 - ``python scripts/arb_bot.py``
     Live mode. Requires the CEX credentials expected by :class:`ExchangeClient`.
-    Pricing via :class:`PricingEngine` is optional (skip if ``ETH_RPC_URL`` is
-    unset; DEX quotes fall back to stub prices in the generator).
+    If ``ETH_RPC_URL`` is set, the bot constructs :class:`PricingEngine`, loads
+    Uniswap V2 pools from ``ARB_V2_POOLS`` (comma-separated ``0x`` addresses) or
+    built-in mainnet defaults (WETH/USDT + WBTC/WETH), and wires
+    ``token_resolver`` so the generator uses on-chain :meth:`PricingEngine.get_quote`
+    prices (fork RPC must be reachable for quote simulation). If setup fails or
+    env is unset, DEX legs use stub prices derived from the CEX book.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from core.types import Address  # noqa: E402
 from executor.circuit_breaker import CircuitBreaker, CircuitBreakerConfig  # noqa: E402
 from executor.engine import (  # noqa: E402
     VENUE_CEX,
@@ -41,18 +46,31 @@ from executor.engine import (  # noqa: E402
     ExecutorConfig,
     ExecutorState,
 )
+from executor.webhook_alerts import (  # noqa: E402
+    WebhookDeliveryConfig,
+    chain_trip_hooks,
+    make_circuit_breaker_webhook_hook,
+)
 from inventory.pnl import ArbRecord, PnLEngine, TradeLeg  # noqa: E402
 from inventory.tracker import InventoryTracker, Venue  # noqa: E402
+from monitoring.prometheus_metrics import PrometheusMetrics, try_start_metrics_server  # noqa: E402
 from strategy.fees import FeeStructure  # noqa: E402
 from strategy.generator import SignalGenerator  # noqa: E402
 from strategy.scorer import SignalScorer  # noqa: E402
 from strategy.signal import Direction, to_decimal  # noqa: E402
+from strategy.signal_priority import ScoredCandidate, sort_candidates_by_priority  # noqa: E402
 
 # --- Module constants --------------------------------------------------------
 DEFAULT_MIN_SCORE = Decimal("60")
 DEFAULT_TICK_SECONDS = 1.0
 DEFAULT_ERROR_BACKOFF_SECONDS = 5.0
 DEFAULT_PAIR = "ETH/USDT"
+
+# Mainnet Uniswap V2 pairs for default DEX routing when ARB_V2_POOLS is unset.
+_DEFAULT_ARB_V2_POOLS: tuple[Address, ...] = (
+    Address("0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852"),  # WETH/USDT
+    Address("0xBb2b8038a1640196FbE3e38816F3e67Cba72D940"),  # WBTC/WETH
+)
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 LOG_DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -342,6 +360,7 @@ class ArbBotConfig:
     signal_config: dict[str, Any] = field(default_factory=dict)
     rpc_url: Optional[str] = None
     max_trade_size: Optional[Decimal] = None
+    max_signals_per_tick: int = 1
 
     def __post_init__(self) -> None:
         self.min_score = to_decimal(self.min_score)
@@ -349,6 +368,8 @@ class ArbBotConfig:
             self.max_trade_size = to_decimal(self.max_trade_size)
             if self.max_trade_size <= 0:
                 raise ValueError("max_trade_size must be positive when set")
+        if self.max_signals_per_tick < 1:
+            raise ValueError("max_signals_per_tick must be >= 1")
 
 
 class ArbBot:
@@ -358,8 +379,35 @@ class ArbBot:
         self.config = config
         self.running = False
 
+        self._metrics = PrometheusMetrics()
+
+        metrics_port = int(os.getenv("PROMETHEUS_METRICS_PORT", "0") or "0")
+        if metrics_port > 0:
+            srv = try_start_metrics_server(metrics_port)
+            if srv is not None:
+                logger.info("Prometheus /metrics listening on port %s", metrics_port)
+
+        def _trip_metric(_cb: Any) -> None:
+            self._metrics.record_circuit_trip()
+
+        wh_url = (
+            os.getenv("ARB_CIRCUIT_WEBHOOK_URL") or os.getenv("ARB_WEBHOOK_URL") or ""
+        ).strip()
+        wh_timeout = float(os.getenv("ARB_WEBHOOK_TIMEOUT_SECONDS", "5") or "5")
+        trip_parts = [_trip_metric]
+        if wh_url:
+            trip_parts.append(
+                make_circuit_breaker_webhook_hook(
+                    WebhookDeliveryConfig(url=wh_url, timeout_seconds=wh_timeout),
+                ),
+            )
+        self._circuit_on_trip = (
+            chain_trip_hooks(*trip_parts) if len(trip_parts) > 1 else trip_parts[0]
+        )
+
         self.chain_client = None
         self.pricing_engine = None
+        self._token_resolver = None
 
         if config.demo:
             self.exchange: Any = MockExchange()
@@ -389,12 +437,47 @@ class ArbBot:
             self.inventory,
             self.fees,
             signal_cfg,
+            token_resolver=self._token_resolver,
         )
         if config.demo:
             self._rewire_demo_dex_prices()
         self.scorer = SignalScorer()
 
-        executor_config = ExecutorConfig(simulation_mode=config.simulation)
+        dex_expected_raw = os.getenv("DEX_EXPECTED_CHAIN_ID", "").strip()
+        dex_expected_id = int(dex_expected_raw) if dex_expected_raw else None
+        allow_mainnet = os.getenv("DEX_ALLOW_MAINNET", "").strip().lower() in ("1", "true", "yes")
+        dex_live = os.getenv("DEX_LIVE_ENABLED", "").strip().lower() in ("1", "true", "yes")
+        dex_preflight_raw = os.getenv("DEX_RUN_PREFLIGHT", "1").strip().lower()
+        dex_run_preflight = dex_preflight_raw not in ("0", "false", "no")
+
+        executor_config = ExecutorConfig(
+            simulation_mode=config.simulation,
+            dex_slippage_bps=Decimal(os.getenv("DEX_SLIPPAGE_BPS", "50")),
+            dex_deadline_seconds=int(os.getenv("DEX_DEADLINE_SECONDS", "300")),
+            dex_run_preflight=dex_run_preflight,
+            dex_expected_chain_id=dex_expected_id,
+            dex_allow_mainnet=allow_mainnet,
+        )
+
+        dex_wallet = None
+        if (
+            dex_live
+            and not config.simulation
+            and not config.demo
+            and self.pricing_engine is not None
+            and self._token_resolver is not None
+        ):
+            try:
+                from core.wallet import WalletManager
+
+                dex_wallet = WalletManager.from_env("PRIVATE_KEY")
+                logger.info("DEX_LIVE_ENABLED: live router swaps enabled for this process")
+            except Exception as exc:
+                logger.warning(
+                    "DEX_LIVE_ENABLED but wallet init failed (%s); DEX leg will fail closed",
+                    exc,
+                )
+
         if config.demo:
             demo_cb = CircuitBreaker(
                 CircuitBreakerConfig(
@@ -402,6 +485,7 @@ class ArbBot:
                     window_seconds=300.0,
                     cooldown_seconds=60.0,
                 ),
+                on_trip=self._circuit_on_trip,
             )
             self.executor: Executor = _FailingExecutor(
                 self.exchange,
@@ -411,14 +495,22 @@ class ArbBot:
                 fees=self.fees,
                 circuit_breaker=demo_cb,
                 mock_exchange=self.exchange,
+                dex_wallet=dex_wallet,
+                dex_token_resolver=self._token_resolver,
+                metrics=self._metrics,
             )
         else:
+            live_cb = CircuitBreaker(on_trip=self._circuit_on_trip)
             self.executor = Executor(
                 self.exchange,
                 self.pricing_engine,
                 self.inventory,
                 executor_config,
                 fees=self.fees,
+                circuit_breaker=live_cb,
+                dex_wallet=dex_wallet,
+                dex_token_resolver=self._token_resolver,
+                metrics=self._metrics,
             )
 
     def _rewire_demo_dex_prices(self) -> None:
@@ -437,8 +529,8 @@ class ArbBot:
             return
         try:
             from chain.client import ChainClient
-            from core.types import Address
             from pricing.pricing_engine import PricingEngine
+            from strategy.dex_token_resolver import token_resolver_from_pricing_engine
 
             self.chain_client = ChainClient([self.config.rpc_url])
             quote_sender = Address.from_string(
@@ -452,10 +544,27 @@ class ArbBot:
                 ws_url,
                 quote_sender,
             )
+            raw = os.getenv("ARB_V2_POOLS", "").strip()
+            if raw:
+                pool_addrs = [Address.from_string(x.strip()) for x in raw.split(",") if x.strip()]
+            else:
+                pool_addrs = list(_DEFAULT_ARB_V2_POOLS)
+            if not pool_addrs:
+                logger.warning("ARB_V2_POOLS is empty; continuing without on-chain pools")
+                self.chain_client = None
+                self.pricing_engine = None
+                return
+            self.pricing_engine.load_pools(pool_addrs)
+            self._token_resolver = token_resolver_from_pricing_engine(self.pricing_engine)
+            logger.info(
+                "PricingEngine: loaded %d Uniswap V2 pool(s); generator uses on-chain DEX quotes",
+                len(self.pricing_engine.pools),
+            )
         except Exception as exc:
-            logger.warning("PricingEngine init failed (%s); continuing without DEX quotes", exc)
+            logger.warning("PricingEngine setup failed (%s); continuing without DEX quotes", exc)
             self.chain_client = None
             self.pricing_engine = None
+            self._token_resolver = None
 
     # ------------------------------------------------------------------
     # Main loop
@@ -538,6 +647,7 @@ class ArbBot:
                 self.exchange.arm_dex_failure_for_current_step()
 
             no_opp_logged = False
+            candidates: list[ScoredCandidate] = []
             for pair in self.config.pairs:
                 signal = self.generator.generate(pair)
                 if signal is None:
@@ -575,6 +685,11 @@ class ArbBot:
                     logger.info("Skipped: score below threshold")
                     continue
 
+                candidates.append(ScoredCandidate(signal=signal, pair=pair))
+
+            for cand in sort_candidates_by_priority(candidates)[: self.config.max_signals_per_tick]:
+                pair = cand.pair
+                signal = cand.signal
                 base = pair.split("/")[0]
                 logger.info(
                     "Executing: %s %s %s",
@@ -754,6 +869,12 @@ def _parse_args(argv: Optional[list[str]] = None) -> ArbBotConfig:
         "--live", action="store_true", help="Disable simulation mode in the executor (dangerous)"
     )
     p.add_argument("--tick", type=float, default=DEFAULT_TICK_SECONDS, help="Seconds between ticks")
+    p.add_argument(
+        "--max-signals-per-tick",
+        type=int,
+        default=int(os.getenv("ARB_MAX_SIGNALS_PER_TICK", "1")),
+        help="Max tradable signals to execute per tick after priority sort (default 1)",
+    )
     args = p.parse_args(argv)
     pairs = list(args.pairs)
     if args.demo and pairs == [DEFAULT_PAIR]:
@@ -767,6 +888,7 @@ def _parse_args(argv: Optional[list[str]] = None) -> ArbBotConfig:
         tick_seconds=args.tick,
         rpc_url=os.getenv("ETH_RPC_URL") or None,
         max_trade_size=max_ts,
+        max_signals_per_tick=max(1, args.max_signals_per_tick),
     )
 
 

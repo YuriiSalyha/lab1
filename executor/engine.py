@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum, auto
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from executor.circuit_breaker import CircuitBreaker
 from executor.replay_protection import ReplayProtection
@@ -91,13 +91,24 @@ class ExecutorConfig:
     min_fill_ratio: Decimal = DEFAULT_MIN_FILL_RATIO
     use_flashbots: bool = False
     simulation_mode: bool = True
+    # Live DEX leg when ``simulation_mode`` is False (needs wallet, resolver, pricing).
+    dex_slippage_bps: Decimal = Decimal("50")
+    dex_deadline_seconds: int = 300
+    dex_run_preflight: bool = True
+    dex_expected_chain_id: Optional[int] = None
+    dex_allow_mainnet: bool = False
 
     def __post_init__(self) -> None:
         self.min_fill_ratio = to_decimal(self.min_fill_ratio)
+        self.dex_slippage_bps = to_decimal(self.dex_slippage_bps)
         if self.leg1_timeout <= 0 or self.leg2_timeout <= 0:
             raise ValueError("timeouts must be positive")
         if not (Decimal("0") < self.min_fill_ratio <= Decimal("1")):
             raise ValueError("min_fill_ratio must be in (0, 1]")
+        if self.dex_deadline_seconds < 1:
+            raise ValueError("dex_deadline_seconds must be >= 1")
+        if not (Decimal("0") <= self.dex_slippage_bps <= Decimal("10000")):
+            raise ValueError("dex_slippage_bps must be in [0, 10000]")
 
 
 class Executor:
@@ -113,6 +124,9 @@ class Executor:
         fees: Optional[FeeStructure] = None,
         circuit_breaker: Optional[CircuitBreaker] = None,
         replay_protection: Optional[ReplayProtection] = None,
+        dex_wallet: Any = None,
+        dex_token_resolver: Optional[Callable[[str], Any]] = None,
+        metrics: Any = None,
     ) -> None:
         self.exchange = exchange_client
         self.pricing = pricing_module
@@ -122,6 +136,9 @@ class Executor:
 
         self.circuit_breaker = circuit_breaker or CircuitBreaker()
         self.replay_protection = replay_protection or ReplayProtection()
+        self.dex_wallet = dex_wallet
+        self.dex_token_resolver = dex_token_resolver
+        self.metrics = metrics
 
     # ------------------------------------------------------------------
     # Public API
@@ -129,47 +146,56 @@ class Executor:
 
     async def execute(self, signal: Signal) -> ExecutionContext:
         """Run both legs (order depends on ``use_flashbots``), return context."""
+        t0 = time.monotonic()
         ctx = ExecutionContext(signal=signal)
-
-        if self.circuit_breaker.is_open():
-            ctx.state = ExecutorState.FAILED
-            ctx.error = "Circuit breaker open"
-            ctx.finished_at = time.time()
-            return ctx
-
-        if self.replay_protection.is_duplicate(signal):
-            ctx.state = ExecutorState.FAILED
-            ctx.error = "Duplicate signal"
-            ctx.finished_at = time.time()
-            return ctx
-
-        ctx.state = ExecutorState.VALIDATING
-        if not signal.is_valid():
-            ctx.state = ExecutorState.FAILED
-            reasons = ", ".join(signal.invalidity_reasons())
-            ctx.error = f"Signal invalid ({reasons})" if reasons else "Signal invalid"
-            ctx.finished_at = time.time()
-            return ctx
-
-        entered_try = False
+        result_label = "unknown"
         try:
-            entered_try = True
-            if self.config.use_flashbots:
-                ctx = await self._execute_dex_first(ctx)
-            else:
-                ctx = await self._execute_cex_first(ctx)
-        finally:
-            if entered_try:
-                # Mark executed only after we actually attempted the legs so
-                # pre-flight failures do not poison replay or the circuit breaker.
-                self.replay_protection.mark_executed(signal)
-                if ctx.state == ExecutorState.DONE:
-                    self.circuit_breaker.record_success()
-                else:
-                    self.circuit_breaker.record_failure()
+            if self.circuit_breaker.is_open():
+                ctx.state = ExecutorState.FAILED
+                ctx.error = "Circuit breaker open"
                 ctx.finished_at = time.time()
+                result_label = "circuit_open"
+                return ctx
 
-        return ctx
+            if self.replay_protection.is_duplicate(signal):
+                ctx.state = ExecutorState.FAILED
+                ctx.error = "Duplicate signal"
+                ctx.finished_at = time.time()
+                result_label = "duplicate"
+                return ctx
+
+            ctx.state = ExecutorState.VALIDATING
+            if not signal.is_valid():
+                ctx.state = ExecutorState.FAILED
+                reasons = ", ".join(signal.invalidity_reasons())
+                ctx.error = f"Signal invalid ({reasons})" if reasons else "Signal invalid"
+                ctx.finished_at = time.time()
+                result_label = "invalid_signal"
+                return ctx
+
+            entered_try = False
+            try:
+                entered_try = True
+                if self.config.use_flashbots:
+                    ctx = await self._execute_dex_first(ctx)
+                else:
+                    ctx = await self._execute_cex_first(ctx)
+            finally:
+                if entered_try:
+                    # Mark executed only after we actually attempted the legs so
+                    # pre-flight failures do not poison replay or the circuit breaker.
+                    self.replay_protection.mark_executed(signal)
+                    if ctx.state == ExecutorState.DONE:
+                        self.circuit_breaker.record_success()
+                    else:
+                        self.circuit_breaker.record_failure()
+                    ctx.finished_at = time.time()
+                    result_label = "done" if ctx.state == ExecutorState.DONE else "failed"
+
+            return ctx
+        finally:
+            if self.metrics is not None:
+                self.metrics.record_execution(result_label, time.monotonic() - t0)
 
     # ------------------------------------------------------------------
     # Path A: CEX leg first (default when not using Flashbots)
@@ -332,7 +358,37 @@ class Executor:
                 "price": signal.dex_price * SIMULATION_DEX_PRICE_ADJUST,
                 "filled": size_d,
             }
-        raise NotImplementedError("Real DEX execution requires a live swap executor")
+        if self.dex_wallet is None or self.dex_token_resolver is None:
+            return {
+                "success": False,
+                "price": signal.dex_price,
+                "filled": Decimal("0"),
+                "error": "dex_wallet_or_resolver_missing",
+            }
+        if self.pricing is None:
+            return {
+                "success": False,
+                "price": signal.dex_price,
+                "filled": Decimal("0"),
+                "error": "pricing_missing",
+            }
+
+        from executor.live_dex_leg import sync_execute_live_dex_leg
+
+        return await asyncio.to_thread(
+            sync_execute_live_dex_leg,
+            pricing_engine=self.pricing,
+            wallet=self.dex_wallet,
+            token_resolver=self.dex_token_resolver,
+            signal=signal,
+            size_base_human=size_d,
+            direction=signal.direction,
+            slippage_bps=self.config.dex_slippage_bps,
+            deadline_seconds=self.config.dex_deadline_seconds,
+            run_preflight=self.config.dex_run_preflight,
+            expected_chain_id=self.config.dex_expected_chain_id,
+            allow_mainnet=self.config.dex_allow_mainnet,
+        )
 
     async def _run_unwind(self, ctx: ExecutionContext) -> None:
         ctx.state = ExecutorState.UNWINDING
