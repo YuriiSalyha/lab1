@@ -327,6 +327,29 @@ def test_executor_config_rejects_bad_input():
         ExecutorConfig(min_fill_ratio=Decimal("0"))
     with pytest.raises(ValueError):
         ExecutorConfig(min_fill_ratio=Decimal("1.5"))
+    with pytest.raises(ValueError):
+        ExecutorConfig(dex_deadline_seconds=0)
+    with pytest.raises(ValueError):
+        ExecutorConfig(dex_slippage_bps=Decimal("10001"))
+
+
+def test_live_dex_leg_returns_error_when_not_configured():
+    """Non-simulation DEX without wallet/resolver must fail closed, not raise."""
+    ex = Executor(
+        None,
+        None,
+        None,
+        ExecutorConfig(simulation_mode=False),
+        fees=FeeStructure(),
+    )
+    sig = _make_signal()
+
+    async def run():
+        return await ex._execute_dex_leg(sig, sig.size)
+
+    out = _run(run())
+    assert out["success"] is False
+    assert out.get("error") == "dex_wallet_or_resolver_missing"
 
 
 def test_pnl_sign_follows_direction():

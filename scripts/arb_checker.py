@@ -16,13 +16,13 @@ if str(_ROOT) not in sys.path:
 
 from dotenv import load_dotenv
 
-from core.types import Address, Token, TokenAmount
+from core.types import Address, TokenAmount
 from exchange.client import ExchangeClient
 from inventory.pnl import PnLEngine
 from inventory.tracker import InventoryTracker, Venue
 from pricing.price_impact_analyzer import impact_row_for_amount
 from pricing.pricing_engine import PricingEngine
-from pricing.uniswap_v2_pair import UniswapV2Pair
+from strategy.dex_token_resolver import base_quote_tokens, find_pool_for_pair
 
 # Default cost assumptions (override via constructor or CLI)
 DEFAULT_CEX_TAKER_FEE_BPS = Decimal("10")
@@ -33,45 +33,6 @@ ORDERBOOK_LIMIT = 50
 
 class ArbCheckError(Exception):
     """Raised when a pool is missing or configuration is invalid."""
-
-
-def _symbol_match(pair_sym: str, token: Token) -> bool:
-    s = pair_sym.upper()
-    t = token.symbol.upper()
-    if s == t:
-        return True
-    return {s, t} <= {"ETH", "WETH"}
-
-
-def _find_pool_for_pair(
-    pools: dict[Address, UniswapV2Pair],
-    base_sym: str,
-    quote_sym: str,
-) -> UniswapV2Pair:
-    for pool in pools.values():
-        ok_b0 = _symbol_match(base_sym, pool.token0) and _symbol_match(quote_sym, pool.token1)
-        ok_b1 = _symbol_match(base_sym, pool.token1) and _symbol_match(quote_sym, pool.token0)
-        if ok_b0 or ok_b1:
-            return pool
-    raise ArbCheckError(
-        f"No Uniswap V2 pool loaded for {base_sym}/{quote_sym}. Call load_pools first.",
-    )
-
-
-def _base_quote_tokens(pool: UniswapV2Pair, base_sym: str, quote_sym: str) -> tuple[Token, Token]:
-    for t in (pool.token0, pool.token1):
-        if _symbol_match(base_sym, t):
-            base_t = t
-            break
-    else:
-        raise ArbCheckError(f"Base token {base_sym} not found on pool")
-    for t in (pool.token0, pool.token1):
-        if _symbol_match(quote_sym, t):
-            quote_t = t
-            break
-    else:
-        raise ArbCheckError(f"Quote token {quote_sym} not found on pool")
-    return base_t, quote_t
 
 
 def _pct_to_bps(price_impact_pct: Decimal) -> Decimal:
@@ -135,8 +96,11 @@ class ArbChecker:
         if not self._pricing.pools:
             raise ArbCheckError("No pools loaded on PricingEngine; call load_pools first.")
 
-        pool = _find_pool_for_pair(self._pricing.pools, base_sym, quote_sym)
-        base_t, quote_t = _base_quote_tokens(pool, base_sym, quote_sym)
+        try:
+            pool = find_pool_for_pair(self._pricing.pools, base_sym, quote_sym)
+            base_t, quote_t = base_quote_tokens(pool, base_sym, quote_sym)
+        except ValueError as e:
+            raise ArbCheckError(str(e)) from e
 
         size_base = Decimal(size_base)
         if size_base <= 0:

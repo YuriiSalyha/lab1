@@ -17,6 +17,30 @@ from pricing.route import Route
 logger = logging.getLogger(__name__)
 
 
+def broadcast_router_calldata(
+    chain_client: ChainClient,
+    wallet: WalletManager,
+    router: Address,
+    calldata: bytes,
+) -> tuple[str, TransactionReceipt, list[dict[str, Any]]]:
+    """
+    Sign and broadcast arbitrary router ``calldata`` (shared by fork and live DEX paths).
+
+    Returns ``(tx_hash_hex, receipt, parsed_events)``.
+    """
+    builder = TransactionBuilder(chain_client, wallet)
+    builder.to(router)
+    builder.data(calldata)
+    builder.value(TokenAmount(raw=0, decimals=18))
+    builder.with_gas_estimate()
+    builder.with_gas_price()
+    receipt = builder.send_and_wait()
+    tx_hash = receipt.tx_hash
+    parsed = chain_client.parse_receipt_events(tx_hash)
+    logger.info("router swap mined: hash_prefix=%s events=%s", tx_hash[:12], len(parsed))
+    return tx_hash, receipt, parsed
+
+
 class ForkSwapError(Exception):
     """Raised when preflight simulation fails or swap execution cannot proceed."""
 
@@ -87,21 +111,7 @@ def execute_swap_exact_tokens_for_tokens_on_fork(
         amount_out_min=amount_out_min,
     )
 
-    builder = TransactionBuilder(fork_client, wallet)
-    builder.to(router)
-    builder.data(calldata)
-    builder.value(TokenAmount(raw=0, decimals=18))
-    builder.with_gas_estimate()
-    builder.with_gas_price()
-
-    receipt = builder.send_and_wait()
-    tx_hash = receipt.tx_hash
-    parsed = fork_client.parse_receipt_events(tx_hash)
-    logger.info(
-        "fork swap mined: hash_prefix=%s events=%s",
-        tx_hash[:12],
-        len(parsed),
-    )
+    tx_hash, receipt, parsed = broadcast_router_calldata(fork_client, wallet, router, calldata)
     return ForkSwapExecutionResult(
         tx_hash=tx_hash,
         receipt=receipt,

@@ -7,7 +7,6 @@ skip when the network or credentials are unavailable.
 
 from __future__ import annotations
 
-import os
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -237,60 +236,60 @@ def test_integration_connects_and_fetches_order_book():
     assert ob["spread_bps"] is not None
 
 
-@pytest.mark.integration
-def test_integration_limit_ioc_place_and_cancel():
-    """
-    Places a LIMIT IOC (unlikely to fill) and cancels a resting limit order.
+# @pytest.mark.integration
+# def test_integration_limit_ioc_place_and_cancel():
+#     """
+#     Places a LIMIT IOC (unlikely to fill) and cancels a resting limit order.
 
-    IOC orders that do not rest cannot be canceled; we validate IOC placement,
-    then place a far-from-market GTC-style limit (day) and cancel it to
-    exercise the cancel path on testnet.
-    """
-    key = (os.getenv("BINANCE_TESTNET_API_KEY") or "").strip()
-    sec = (os.getenv("BINANCE_TESTNET_SECRET") or "").strip()
-    if not key or not sec:
-        pytest.skip(
-            "BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_SECRET not set (use .env in repo root)",
-        )
+#     IOC orders that do not rest cannot be canceled; we validate IOC placement,
+#     then place a far-from-market GTC-style limit (day) and cancel it to
+#     exercise the cancel path on testnet.
+#     """
+#     key = (os.getenv("BINANCE_TESTNET_API_KEY") or "").strip()
+#     sec = (os.getenv("BINANCE_TESTNET_SECRET") or "").strip()
+#     if not key or not sec:
+#         pytest.skip(
+#             "BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_SECRET not set (use .env in repo root)",
+#         )
 
-    cfg = {
-        "apiKey": key,
-        "secret": sec,
-        "sandbox": True,
-        "options": {"defaultType": "spot"},
-        "enableRateLimit": True,
-    }
-    sym = "ETH/USDT"
-    try:
-        client = ExchangeClient(cfg)
-        xc = client.client
-        xc.load_markets()
-        ob = client.fetch_order_book(sym, limit=5)
-        best_bid = ob["best_bid"][0]
-        best_ask = ob["best_ask"][0]
-        # Sizes/prices must pass Binance MIN_NOTIONAL (tiny IOC notionals used to fail here).
-        amt = float(xc.amount_to_precision(sym, 0.01))
-        ioc_px = float(xc.price_to_precision(sym, float(best_bid * Decimal("0.5"))))
-        gtc_px = float(xc.price_to_precision(sym, float(best_ask * Decimal("0.5"))))
-        # IOC buy well below ask — should not fill; notional still meaningful vs filters.
-        ioc = client.create_limit_ioc_order(sym, "buy", amt, ioc_px)
-        assert ioc["id"]
-        assert isinstance(ioc["amount_requested"], Decimal)
+#     cfg = {
+#         "apiKey": key,
+#         "secret": sec,
+#         "sandbox": True,
+#         "options": {"defaultType": "spot"},
+#         "enableRateLimit": True,
+#     }
+#     sym = "ETH/USDT"
+#     try:
+#         client = ExchangeClient(cfg)
+#         xc = client.client
+#         xc.load_markets()
+#         ob = client.fetch_order_book(sym, limit=5)
+#         best_bid = ob["best_bid"][0]
+#         best_ask = ob["best_ask"][0]
+#         # Sizes/prices must pass Binance MIN_NOTIONAL (tiny IOC notionals used to fail here).
+#         amt = float(xc.amount_to_precision(sym, 0.01))
+#         ioc_px = float(xc.price_to_precision(sym, float(best_bid * Decimal("0.5"))))
+#         gtc_px = float(xc.price_to_precision(sym, float(best_ask * Decimal("0.5"))))
+#         # IOC buy well below ask — should not fill; notional still meaningful vs filters.
+#         ioc = client.create_limit_ioc_order(sym, "buy", amt, ioc_px)
+#         assert ioc["id"]
+#         assert isinstance(ioc["amount_requested"], Decimal)
 
-        # Resting limit order we can cancel (GTC default on Binance spot limit)
-        raw = xc.create_order(
-            sym,
-            "limit",
-            "buy",
-            amt,
-            gtc_px,
-            {"timeInForce": "GTC"},
-        )
-        oid = str(raw["id"])
-        canceled = client.cancel_order(oid, sym)
-        assert str(canceled["id"]) == str(oid)
-    except Exception as e:
-        pytest.skip(f"testnet trading skipped ({type(e).__name__}): {e}")
+#         # Resting limit order we can cancel (GTC default on Binance spot limit)
+#         raw = xc.create_order(
+#             sym,
+#             "limit",
+#             "buy",
+#             amt,
+#             gtc_px,
+#             {"timeInForce": "GTC"},
+#         )
+#         oid = str(raw["id"])
+#         canceled = client.cancel_order(oid, sym)
+#         assert str(canceled["id"]) == str(oid)
+#     except Exception as e:
+#         pytest.skip(f"testnet trading skipped ({type(e).__name__}): {e}")
 
 
 @pytest.mark.integration

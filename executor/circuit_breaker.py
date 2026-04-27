@@ -11,7 +11,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Callable, Optional
+
+OnTripHook = Callable[[Any], None]
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +38,16 @@ class CircuitBreakerConfig:
 class CircuitBreaker:
     """Rolling-window failure circuit breaker."""
 
-    def __init__(self, config: Optional[CircuitBreakerConfig] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[CircuitBreakerConfig] = None,
+        *,
+        on_trip: Optional[OnTripHook] = None,
+    ) -> None:
         self.config = config or CircuitBreakerConfig()
         self.failures: list[float] = []
         self.tripped_at: Optional[float] = None
+        self._on_trip = on_trip
 
     @property
     def failure_threshold(self) -> int:
@@ -67,6 +75,11 @@ class CircuitBreaker:
                 len(self.failures),
                 self.config.cooldown_seconds,
             )
+            if self._on_trip is not None:
+                try:
+                    self._on_trip(self)
+                except Exception:
+                    logger.exception("on_trip hook raised")
 
     def is_open(self) -> bool:
         if self.tripped_at is None:

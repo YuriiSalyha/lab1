@@ -55,6 +55,22 @@ def test_circuit_breaker_trips():
     assert cb.is_open()
 
 
+def test_circuit_breaker_on_trip_hook_exception_does_not_break_trip():
+    calls: list[int] = []
+
+    def bad_hook(_cb: CircuitBreaker) -> None:
+        calls.append(1)
+        raise RuntimeError("hook boom")
+
+    cb = CircuitBreaker(
+        CircuitBreakerConfig(failure_threshold=1, window_seconds=60, cooldown_seconds=60),
+        on_trip=bad_hook,
+    )
+    cb.record_failure()
+    assert cb.is_open()
+    assert calls == [1]
+
+
 def test_circuit_breaker_resets(monkeypatch):
     cb = CircuitBreaker(
         CircuitBreakerConfig(
