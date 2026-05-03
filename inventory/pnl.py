@@ -11,10 +11,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from inventory.tracker import Venue
-
-# Fee → USD (estimation; align with rebalancer reference prices)
-REFERENCE_USD_PER_ETH = Decimal("2000")
-REFERENCE_USD_PER_STABLE = Decimal("1")
+from inventory.usd_mark import (
+    REFERENCE_USD_PER_ETH,
+    REFERENCE_USD_PER_STABLE,
+)
 
 
 def _fee_to_usd(fee: Decimal, fee_asset: str) -> Decimal:
@@ -181,7 +181,12 @@ class PnLEngine:
         return out
 
     def export_csv(self, filepath: str):
-        """Export all trades to CSV for analysis."""
+        """Export completed :class:`ArbRecord` rows to CSV (narrow schema).
+
+        For full trade/dry-run/failure analysis (signals, legs, metrics, balance
+        verify), use the bot's append-only journal (default ``logs/trades_journal.csv``;
+        see ``monitoring/trade_csv_log.py`` and ``ARB_TRADE_CSV``).
+        """
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
         fieldnames = [

@@ -6,11 +6,11 @@ Standalone script: no imports from other files under ``scripts/`` (safe to run a
 Usage:
 
     python scripts/pricing_best_route.py \\
-        --token-in 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \\
-        --token-out 0xdAC17F958D2ee523a2206206994597C13D831ec7 \\
+        --token-in 0xaf88d065e77c8cC2239327C5EDb3A432268e5831 \\
+        --token-out 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9 \\
         --amount 10000
 
-Optional ``--pools`` defaults to several liquid mainnet Uniswap V2 pairs
+Optional ``--pools`` defaults to several liquid **Arbitrum One** Uniswap V2 pairs
 (WETH hub to USDC, USDT, DAI, plus WBTC/WETH).
 
 ``--discover fetch`` loads top pairs from a Uniswap V2 subgraph (see ``UNISWAP_V2_SUBGRAPH_URL``
@@ -52,11 +52,11 @@ from pricing.uniswap_v2_pair import UniswapV2Pair
 from pricing.uniswap_v3_discovery import pools_for_pair
 from pricing.uniswap_v3_pool import UniswapV3PoolQuoter
 
-POOL_WETH_USDC = Address("0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc")
-POOL_WETH_USDT = Address("0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852")
-POOL_WETH_DAI = Address("0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11")
-# Mainnet Uniswap V2 WBTC/WETH (factory getPair; not the obsolete 0xBb2b...163019... address).
-POOL_WBTC_WETH = Address("0xBb2b8038a1640196FbE3e38816F3e67Cba72D940")
+# Arbitrum One Uniswap V2 (factory 0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9).
+POOL_WETH_USDC = Address("0xF64Dfe17C8b87F012FCf50FbDA1D62bfA148366a")
+POOL_WETH_USDT = Address("0xd04Bc65744306A5C149414dd3CD5c984D9d3470d")
+POOL_WETH_DAI = Address("0x8dca5a5DBA32cA529594d43F86ED4210EaD2Ed83")
+POOL_WBTC_WETH = Address("0x8c1D83A25eE2dA1643A5d937562682b1aC6C856B")
 _DEFAULT_POOL_ADDRS = (
     POOL_WETH_USDC,
     POOL_WETH_USDT,
@@ -67,7 +67,7 @@ _DEFAULT_POOLS_STR = ",".join(a.checksum for a in _DEFAULT_POOL_ADDRS)
 
 
 def _http_rpc(cli_rpc: str | None) -> str:
-    """This script only: resolve mainnet HTTP RPC (env or --rpc)."""
+    """Resolve HTTP JSON-RPC URL from ``--rpc`` or env (same keys as other pricing CLIs)."""
     load_dotenv()
     if cli_rpc and cli_rpc.strip():
         return cli_rpc.strip()
@@ -102,21 +102,21 @@ def _parse_pool_addresses(pools_csv: str) -> list[Address]:
     return [Address(p) for p in parts]
 
 
-def _pair_from_chain_mainnet(addr: Address, client: ChainClient) -> UniswapV2Pair:
-    """Load a V2 pair; exit with a clear hint if RPC is not Ethereum mainnet."""
+def _pair_from_chain_default_pools(addr: Address, client: ChainClient) -> UniswapV2Pair:
+    """Load a V2 pair; exit with a clear hint if RPC cannot read default Arbitrum pool addresses."""
     try:
         return UniswapV2Pair.from_chain(addr, client)
     except Exception as e:
         raise SystemExit(
             f"Failed to read Uniswap V2 pair at {addr.checksum}: {e}\n"
-            "Default --pools are deployed on Ethereum mainnet (chain id 1). "
-            "Point RPC_ENDPOINT, MAINNET_RPC, or ETH_MAINNET_RPC at a mainnet HTTP URL, "
-            "or pass --rpc https://... (not Sepolia or other networks)."
+            "Default --pools are Uniswap V2 pairs on Arbitrum One (chain id 42161). "
+            "Point RPC_ENDPOINT, MAINNET_RPC, or ETH_MAINNET_RPC at an Arbitrum HTTP URL "
+            "(e.g. https://arb1.arbitrum.io/rpc), or pass --pools with pairs on your chain."
         ) from e
 
 
 def _load_pools_from_csv(client: ChainClient, pools_csv: str) -> list[UniswapV2Pair]:
-    return [_pair_from_chain_mainnet(a, client) for a in _parse_pool_addresses(pools_csv)]
+    return [_pair_from_chain_default_pools(a, client) for a in _parse_pool_addresses(pools_csv)]
 
 
 def _build_pool_list(
@@ -161,7 +161,7 @@ def _build_pool_list(
         discovered,
         explicit_addrs,
         client,
-        load_pair=_pair_from_chain_mainnet,
+        load_pair=_pair_from_chain_default_pools,
     )
 
 
@@ -199,7 +199,7 @@ def _report_no_route(
     if token_in not in covered:
         print(
             f"token-in {token_in.symbol} ({addr_in.checksum}) is not in any listed pair; "
-            "add a V2 pair that includes it (often WETH/token-in on mainnet)."
+            "add a V2 pair that includes it (often WETH/token-in on Arbitrum)."
         )
     elif token_out not in covered:
         print(
@@ -217,7 +217,7 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description="Best route by net output over Uniswap V2 (+ optional V3) pools",
     )
-    p.add_argument("--rpc", default=None, help="HTTP mainnet RPC (overrides env)")
+    p.add_argument("--rpc", default=None, help="HTTP RPC for the chain you use (overrides env)")
     p.add_argument(
         "--token-in",
         required=True,
@@ -241,7 +241,7 @@ def main() -> None:
         default=_DEFAULT_POOLS_STR,
         help=(
             "Comma-separated Uniswap V2 pair addresses; merged with --discover and "
-            "refreshed on-chain (default: WETH/USDC, WETH/USDT, WETH/DAI, WBTC/WETH)"
+            "refreshed on-chain (default: Arbitrum One WETH/USDC, WETH/USDT, WETH/DAI, WBTC/WETH)"
         ),
     )
     p.add_argument(
@@ -305,7 +305,7 @@ def main() -> None:
         metavar="T0,T1",
         help=(
             "Two ERC-20 addresses (comma-separated); add deployed V3 pools for 500/3000/10000 fee "
-            "(mainnet factory)"
+            "(chain inferred from your RPC)"
         ),
     )
     args = p.parse_args()

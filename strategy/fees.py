@@ -15,7 +15,19 @@ from strategy.signal import to_decimal
 BPS_DENOM = Decimal("10000")
 DEFAULT_CEX_TAKER_BPS = Decimal("10")
 DEFAULT_DEX_SWAP_BPS = Decimal("30")
-DEFAULT_GAS_COST_USD = Decimal("5")
+DEFAULT_GAS_COST_USD = Decimal("0.10")
+
+
+def cex_taker_bps_from_ccxt_ratio(taker_ratio: Any) -> Decimal:
+    """Map CCXT ``fetch_trading_fee`` taker ratio to basis points.
+
+    CCXT returns ``maker`` / ``taker`` as fractions of notional (e.g. ``0.001``
+    means 0.1% of the trade, i.e. **10 bps**).
+    """
+    r = to_decimal(taker_ratio)
+    if r <= 0:
+        raise ValueError(f"CCXT taker ratio must be positive, got {taker_ratio!r}")
+    return r * BPS_DENOM
 
 
 @dataclass
