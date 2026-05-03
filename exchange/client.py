@@ -21,6 +21,7 @@ from ccxt.base.errors import (
 )
 
 from exchange.rate_limiter import WeightRateLimiter
+from strategy.fees import cex_taker_bps_from_ccxt_ratio
 
 logger = logging.getLogger(__name__)
 
@@ -196,9 +197,15 @@ class ExchangeClient:
             return f"server_time_ms={result}"
         return repr(result)[:500]
 
+    # High-frequency, low-information requests stay at DEBUG so the per-tick
+    # console output is dominated by signal/trade lines, not raw RPC chatter.
+    # Other ops (orders, balance, fee, time) keep their INFO level for audit.
+    _QUIET_OPS = frozenset({"fetch_order_book", "fetch_ticker"})
+
     def _ccxt_request(self, operation: str, weight: int, fn: Callable[[], T]) -> T:
         self._rate_limiter.acquire(weight)
-        logger.info("%s: executing (weight=%s)", operation, weight)
+        op_log_level = logging.DEBUG if operation in self._QUIET_OPS else logging.INFO
+        logger.log(op_log_level, "%s: executing (weight=%s)", operation, weight)
         try:
             result = fn()
         except AuthenticationError as e:
@@ -212,7 +219,12 @@ class ExchangeClient:
             raise
 
         self._log_used_weight_header()
-        logger.info("%s: ok — %s", operation, self._summarize_response(operation, result))
+        logger.log(
+            op_log_level,
+            "%s: ok — %s",
+            operation,
+            self._summarize_response(operation, result),
+        )
         return result
 
     def _parse_fee(self, raw: dict) -> tuple[Decimal, str | None]:
@@ -459,3 +471,39 @@ class ExchangeClient:
             "maker": self.to_decimal(raw.get("maker")),
             "taker": self.to_decimal(raw.get("taker")),
         }
+
+    def max_taker_fee_bps_for_symbols(self, symbols: list[str]) -> Decimal | None:
+        """Return the maximum CCXT **taker** fee in bps across ``symbols``.
+
+        Uses :meth:`get_trading_fees` per symbol. Returns ``None`` if every lookup
+        fails or yields a non-positive taker ratio. Ratios above **5%** (500 bps)
+        per symbol are ignored as bad data.
+        """
+        if not symbols:
+            return None
+        cap_bps = Decimal("500")
+        best: Decimal | None = None
+        for sym in symbols:
+            try:
+                row = self.get_trading_fees(sym)
+                taker = row.get("taker")
+                if taker is None:
+                    continue
+                td = self.to_decimal(taker)
+                if td <= 0:
+                    logger.warning("CEX taker fee missing or zero for %s", sym)
+                    continue
+                bps = cex_taker_bps_from_ccxt_ratio(td)
+                if bps > cap_bps:
+                    logger.warning(
+                        "CEX taker bps implausibly high for %s (%s > %s), skipping",
+                        sym,
+                        bps,
+                        cap_bps,
+                    )
+                    continue
+                best = bps if best is None else max(best, bps)
+            except Exception as exc:
+                logger.warning("fetch_trading_fee failed for %s: %s", sym, exc)
+                continue
+        return best

@@ -87,6 +87,17 @@ _ERC20_METADATA_ABI = [
     },
 ]
 
+# Read-only `balanceOf(address)` fragment used by `ChainClient.get_erc20_balance`.
+_ERC20_BALANCE_OF_ABI = [
+    {
+        "constant": True,
+        "inputs": [{"name": "owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "type": "function",
+    },
+]
+
 # If latest block is older than this many seconds, treat the node as lagging
 _NODE_LAG_THRESHOLD_SECONDS = 120
 
@@ -236,6 +247,39 @@ class ChainClient:
         """Return ETH balance for *address* as ``TokenAmount`` (18 decimals)."""
         raw = self._execute_with_retry("get_balance", address.checksum)
         return TokenAmount(raw=raw, decimals=18, symbol="ETH")
+
+    def get_erc20_balance(self, token: Address, owner: Address) -> TokenAmount:
+        """Return ERC-20 ``balanceOf(owner)`` as :class:`TokenAmount`.
+
+        Token decimals + symbol come from :class:`TokenMetadataCache` so callers
+        can safely format the result via :attr:`TokenAmount.human` without
+        knowing the token in advance. RPC failures bubble up as :class:`RPCError`.
+        """
+        contract = self.w3.eth.contract(
+            address=Web3.to_checksum_address(token.checksum),
+            abi=_ERC20_BALANCE_OF_ABI,
+        )
+        try:
+            raw_balance = int(
+                contract.functions.balanceOf(
+                    Web3.to_checksum_address(owner.checksum),
+                ).call(),
+            )
+        except Exception as err:
+            logger.warning(
+                "erc20 balanceOf failed token_suffix=%s owner_suffix=%s: %s",
+                token.lower[-8:],
+                owner.lower[-8:],
+                err,
+            )
+            raise RPCError(
+                f"balanceOf({owner.checksum}) failed on {token.checksum}: {err}",
+            ) from err
+
+        meta = self.token_cache.get(token.checksum)
+        decimals = int(meta.get("decimals") or 18)
+        symbol = str(meta.get("symbol") or "UNKNOWN")
+        return TokenAmount(raw=raw_balance, decimals=decimals, symbol=symbol)
 
     def get_nonce(self, address: Address) -> int:
         """Next nonce for *address* (thread-safe local counter + chain ``pending``)."""

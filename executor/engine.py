@@ -83,6 +83,11 @@ class ExecutionContext:
     error: Optional[str] = None
     was_unwound: bool = False
 
+    # Free-form metadata bubbled up from leg implementations. Used today by the
+    # dry-run-signed DEX leg to surface the signed raw tx hex, real tx hash
+    # (which we deliberately do NOT broadcast), and fork preflight gas usage.
+    metadata: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class ExecutorConfig:
@@ -97,6 +102,11 @@ class ExecutorConfig:
     dex_run_preflight: bool = True
     dex_expected_chain_id: Optional[int] = None
     dex_allow_mainnet: bool = False
+    # When True, the DEX leg goes through the live router-calldata path with
+    # ``dry_run=True`` so the bot builds + fork-preflights + signs the swap but
+    # skips broadcasting. CEX leg behaviour is unaffected (still controlled by
+    # ``simulation_mode``).
+    dex_dry_run_signed: bool = False
 
     def __post_init__(self) -> None:
         self.min_fill_ratio = to_decimal(self.min_fill_ratio)
@@ -249,10 +259,13 @@ class Executor:
             await self._run_unwind(ctx)
             ctx.state = ExecutorState.FAILED
             ctx.error = f"DEX failed - unwound ({leg2.get('error', 'unknown')})"
+            self._absorb_leg_metadata(ctx, leg2, leg_label="leg2")
             return ctx
 
         ctx.leg2_fill_price = to_decimal(leg2["price"])
         ctx.leg2_fill_size = to_decimal(leg2["filled"])
+        ctx.leg2_tx_hash = leg2.get("tx_hash") or ctx.leg2_tx_hash
+        self._absorb_leg_metadata(ctx, leg2, leg_label="leg2")
         ctx.actual_net_pnl = self._calculate_pnl(ctx)
         ctx.state = ExecutorState.DONE
         return ctx
@@ -279,6 +292,7 @@ class Executor:
         if not leg1["success"]:
             ctx.state = ExecutorState.FAILED
             ctx.error = "DEX failed (no cost via Flashbots)"
+            self._absorb_leg_metadata(ctx, leg1, leg_label="leg1")
             return ctx
 
         fill_price = to_decimal(leg1["price"])
@@ -286,10 +300,13 @@ class Executor:
         if fill_size / signal.size < self.config.min_fill_ratio:
             ctx.state = ExecutorState.FAILED
             ctx.error = "DEX partial fill below threshold"
+            self._absorb_leg_metadata(ctx, leg1, leg_label="leg1")
             return ctx
 
         ctx.leg1_fill_price = fill_price
         ctx.leg1_fill_size = fill_size
+        ctx.leg2_tx_hash = leg1.get("tx_hash") or ctx.leg2_tx_hash
+        self._absorb_leg_metadata(ctx, leg1, leg_label="leg1")
         ctx.state = ExecutorState.LEG1_FILLED
 
         ctx.state = ExecutorState.LEG2_PENDING
@@ -349,8 +366,45 @@ class Executor:
         }
 
     async def _execute_dex_leg(self, signal: Signal, size: Decimal) -> dict[str, Any]:
-        """Place one DEX leg. Simulation-only unless a real swap executor is wired."""
+        """Place one DEX leg.
+
+        Three modes, in order of precedence:
+
+        1. ``dex_dry_run_signed`` — go through the live router-calldata path
+           with ``dry_run=True``: real route, fork preflight, EIP-1559 build,
+           signing, but **no broadcast**. Used by ``ARB_DRY_RUN_MODE=signed``.
+        2. ``simulation_mode`` and not signed-dry-run — pure math simulation,
+           no wallet / RPC required.
+        3. Otherwise — live broadcast via :func:`sync_execute_live_dex_leg`.
+        """
         size_d = to_decimal(size)
+        if self.config.dex_dry_run_signed:
+            if self.dex_wallet is None or self.dex_token_resolver is None or self.pricing is None:
+                return {
+                    "success": False,
+                    "price": signal.dex_price,
+                    "filled": Decimal("0"),
+                    "error": "dry_run_signed_requires_wallet_resolver_pricing",
+                    "dry_run": True,
+                }
+            from executor.live_dex_leg import sync_execute_live_dex_leg
+
+            return await asyncio.to_thread(
+                sync_execute_live_dex_leg,
+                pricing_engine=self.pricing,
+                wallet=self.dex_wallet,
+                token_resolver=self.dex_token_resolver,
+                signal=signal,
+                size_base_human=size_d,
+                direction=signal.direction,
+                slippage_bps=self.config.dex_slippage_bps,
+                deadline_seconds=self.config.dex_deadline_seconds,
+                run_preflight=self.config.dex_run_preflight,
+                expected_chain_id=self.config.dex_expected_chain_id,
+                allow_mainnet=self.config.dex_allow_mainnet,
+                dry_run=True,
+            )
+
         if self.config.simulation_mode:
             await asyncio.sleep(SIMULATION_DEX_LATENCY_S)
             return {
@@ -421,6 +475,30 @@ class Executor:
             )
         except Exception as exc:
             logger.exception("UNWIND failed: %s", exc)
+
+    def _absorb_leg_metadata(
+        self,
+        ctx: ExecutionContext,
+        leg_result: dict[str, Any],
+        *,
+        leg_label: str,
+    ) -> None:
+        """Copy non-PnL leg fields (signed raw tx, gas used, dry_run flag) onto ``ctx.metadata``.
+
+        The DEX dry-run-signed path uses this to surface the *real* tx hash and
+        signed payload so the bot can log them, write them to CSV, and Telegram
+        them — without ever broadcasting.
+        """
+        keys = (
+            "dry_run",
+            "signed_raw_tx_hex",
+            "signed_tx_hash",
+            "preflight_gas_used",
+            "router",
+        )
+        for key in keys:
+            if key in leg_result and leg_result[key] is not None:
+                ctx.metadata[f"{leg_label}_{key}"] = leg_result[key]
 
     def _calculate_pnl(self, ctx: ExecutionContext) -> Decimal:
         """Compute net PnL from filled legs using the same :class:`FeeStructure`."""
