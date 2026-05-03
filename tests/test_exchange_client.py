@@ -306,3 +306,27 @@ def test_integration_rate_limiter_does_not_break_live_client():
             client.fetch_order_book("ETH/USDT", limit=5)
     except Exception as e:
         pytest.skip(f"testnet unreachable: {e}")
+
+
+def test_max_taker_fee_bps_for_symbols(client, mock_ccxt_binance):
+    mock_ccxt_binance.fetch_trading_fee.side_effect = [
+        {"maker": "0.001", "taker": "0.001"},
+        {"maker": "0.0005", "taker": "0.0015"},
+    ]
+    bps = client.max_taker_fee_bps_for_symbols(["ETH/USDT", "BTC/USDT"])
+    assert bps == Decimal("15")
+
+
+def test_max_taker_fee_bps_for_symbols_empty(client):
+    assert client.max_taker_fee_bps_for_symbols([]) is None
+
+
+def test_max_taker_fee_bps_skips_failed_symbol(client, mock_ccxt_binance):
+    from ccxt.base.errors import ExchangeError
+
+    mock_ccxt_binance.fetch_trading_fee.side_effect = [
+        ExchangeError("bad"),
+        {"maker": "0", "taker": "0.001"},
+    ]
+    bps = client.max_taker_fee_bps_for_symbols(["ETH/USDT", "BTC/USDT"])
+    assert bps == Decimal("10")

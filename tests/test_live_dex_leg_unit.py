@@ -64,3 +64,25 @@ def test_sync_execute_pricing_not_ready():
     )
     assert out["success"] is False
     assert out.get("error") == "pricing_engine_not_ready"
+    # New default kwarg keeps backward compatibility (dry_run flag echo).
+    assert out.get("dry_run") is False
+
+
+def test_sync_execute_pricing_not_ready_dry_run_echoes_flag():
+    pe = SimpleNamespace(route_finder=None, pools=[])
+    out = sync_execute_live_dex_leg(
+        pricing_engine=pe,
+        wallet=SimpleNamespace(address="0x" + "1" * 40),
+        token_resolver=lambda p: (_ for _ in ()).throw(AssertionError("resolver not used")),
+        signal=_signal(),
+        size_base_human=Decimal("0.1"),
+        direction=Direction.BUY_CEX_SELL_DEX,
+        slippage_bps=Decimal("50"),
+        deadline_seconds=300,
+        run_preflight=False,
+        expected_chain_id=None,
+        allow_mainnet=False,
+        dry_run=True,
+    )
+    assert out["success"] is False
+    assert out.get("dry_run") is True

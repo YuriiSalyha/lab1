@@ -10,10 +10,11 @@ from web3.exceptions import ContractLogicError
 
 from core.types import Address, Token
 from pricing.fork_simulator import ForkSimulator, SimulationResult, _build_calldata_from_swap_params
+from pricing.pricing_engine import DEFAULT_UNISWAP_V2_ROUTER
 from pricing.route import Route
 from pricing.uniswap_v2_pair import UniswapV2Pair
 
-ROUTER = Address("0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D")
+ROUTER = DEFAULT_UNISWAP_V2_ROUTER
 SENDER = Address("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266")
 RECV = Address("0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
 

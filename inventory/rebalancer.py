@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from inventory.tracker import InventoryTracker, Venue
+from inventory.usd_mark import REFERENCE_USD_PER_ETH, REFERENCE_USD_PER_STABLE
 
-# Hardcoded for testnet / estimation purposes
 TRANSFER_FEES: dict[str, dict] = {
     "ETH": {
         "withdrawal_fee": Decimal("0.005"),
@@ -37,9 +37,7 @@ MIN_OPERATING_BALANCE: dict[str, Decimal] = {
     "USDC": Decimal("500"),
 }
 
-# Reference USD (estimation only — configure for your environment)
-REFERENCE_USD_PER_ETH = Decimal("2000")
-REFERENCE_USD_PER_STABLE = Decimal("1")
+# Reference USD (estimation only — configure for your environment); see inventory.usd_mark.
 
 
 @dataclass

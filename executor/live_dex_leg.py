@@ -3,6 +3,10 @@ Live-chain Uniswap V2 router swap for one DEX arb leg (ERC20–ERC20 only).
 
 Uses the same broadcast path as :func:`pricing.fork_swap_executor.broadcast_router_calldata`.
 Caller must ensure router allowance and sufficient balances on the target chain.
+
+A signed-but-not-broadcast variant powers ``ARB_DRY_RUN_MODE=signed`` so the
+bot can run the full production pipeline (route + fork preflight + EIP-1559 build
++ signing) and only stop short of ``eth_sendRawTransaction``.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ import time
 from decimal import Decimal
 from typing import Any, Callable, Optional
 
+from chain.builder import TransactionBuilder
 from chain.uniswap_v2_router import encode_uniswap_v2_swap_calldata
 from core.types import Address, Token, TokenAmount
 from core.wallet import WalletManager
@@ -26,6 +31,10 @@ logger = logging.getLogger(__name__)
 MAINNET_CHAIN_ID = 1
 BPS_DENOM = 10_000
 DEADLINE_BUFFER_S = 30
+
+# Synthetic tx hash prefix used in dry-run-signed responses so downstream consumers
+# (CSV, Telegram, console) can recognise an "as-if-broadcast" tx at a glance.
+DRY_RUN_TX_HASH_PREFIX = "0xDRYRUN"
 
 
 class LiveDexLegError(Exception):
@@ -94,9 +103,17 @@ def sync_execute_live_dex_leg(
     run_preflight: bool,
     expected_chain_id: Optional[int],
     allow_mainnet: bool,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """
     Execute one V2 router swap for the DEX leg.
+
+    When ``dry_run`` is ``True`` the function still runs the **full production
+    flow** — route resolution, optional fork preflight, EIP-1559 transaction
+    build, balance check, and signing — but skips ``eth_sendRawTransaction``.
+    The returned dict includes the signed raw-tx hex under ``signed_raw_tx_hex``
+    plus a synthetic ``tx_hash`` starting with ``0xDRYRUN`` so callers can treat
+    the result like a successful broadcast for accounting / notifications.
 
     Returns the same shape as :meth:`executor.engine.Executor._execute_dex_leg` simulation dict.
     """
@@ -106,6 +123,7 @@ def sync_execute_live_dex_leg(
             "price": signal.dex_price,
             "filled": Decimal("0"),
             "error": "pricing_engine_not_ready",
+            "dry_run": dry_run,
         }
 
     client = pricing_engine.client
@@ -120,6 +138,7 @@ def sync_execute_live_dex_leg(
             "price": signal.dex_price,
             "filled": Decimal("0"),
             "error": str(e),
+            "dry_run": dry_run,
         }
 
     base_t, quote_t = token_resolver(signal.pair)
@@ -130,6 +149,7 @@ def sync_execute_live_dex_leg(
             "price": signal.dex_price,
             "filled": Decimal("0"),
             "error": "zero_base_amount",
+            "dry_run": dry_run,
         }
 
     router = pricing_engine.swap_router
@@ -173,6 +193,7 @@ def sync_execute_live_dex_leg(
                     "price": signal.dex_price,
                     "filled": Decimal("0"),
                     "error": "no_route",
+                    "dry_run": dry_run,
                 }
             gross = route.get_output(base_raw)
             quote_atoms_for_price = gross
@@ -195,6 +216,7 @@ def sync_execute_live_dex_leg(
                 "deadline": deadline,
             }
 
+        preflight_gas_used: Optional[int] = None
         if run_preflight:
             sim = ForkSimulator(rpc_url).simulate_swap(router, swap_params, sender)
             if not sim.success:
@@ -203,10 +225,9 @@ def sync_execute_live_dex_leg(
                     "price": signal.dex_price,
                     "filled": Decimal("0"),
                     "error": f"preflight:{sim.error}",
+                    "dry_run": dry_run,
                 }
-
-        tx_hash, _receipt, _parsed = broadcast_router_calldata(client, wallet, router, calldata)
-        logger.info("live DEX leg mined tx=%s", tx_hash[:18])
+            preflight_gas_used = int(getattr(sim, "gas_used", 0) or 0)
 
         price = _effective_price_quote_per_base(
             base_raw,
@@ -215,11 +236,62 @@ def sync_execute_live_dex_leg(
             quote_t.decimals,
         )
 
+        if dry_run:
+            # Build + sign the EIP-1559 transaction so it is byte-identical to
+            # what we would have broadcast — only `eth_sendRawTransaction` is
+            # skipped. The signed payload is exposed in the returned dict so the
+            # bot can log it / Telegram it without ever touching the network.
+            try:
+                builder = TransactionBuilder(client, wallet)
+                builder.to(router)
+                builder.data(calldata)
+                builder.value(TokenAmount(raw=0, decimals=18))
+                builder.with_gas_estimate()
+                builder.with_gas_price()
+                signed = builder.build_and_sign()
+            except Exception as build_exc:
+                logger.warning("dry-run signed build failed: %s", build_exc)
+                return {
+                    "success": False,
+                    "price": signal.dex_price,
+                    "filled": Decimal("0"),
+                    "error": f"dry_run_build:{build_exc}",
+                    "dry_run": True,
+                }
+
+            raw_tx_bytes = bytes(signed.raw_transaction)
+            raw_tx_hex = "0x" + raw_tx_bytes.hex()
+            real_hash = signed.hash.hex() if hasattr(signed.hash, "hex") else str(signed.hash)
+            if not real_hash.startswith("0x"):
+                real_hash = "0x" + real_hash
+            synthetic_hash = f"{DRY_RUN_TX_HASH_PREFIX}{real_hash[2:18]}"
+            logger.info(
+                "DEX leg dry-run signed tx (NOT broadcast) real_hash_prefix=%s synthetic=%s",
+                real_hash[:12],
+                synthetic_hash,
+            )
+            return {
+                "success": True,
+                "price": to_decimal(price),
+                "filled": to_decimal(size_base_human),
+                "tx_hash": synthetic_hash,
+                "dry_run": True,
+                "signed_raw_tx_hex": raw_tx_hex,
+                "signed_tx_hash": real_hash,
+                "preflight_gas_used": preflight_gas_used,
+                "router": router.checksum,
+                "swap_params": swap_params,
+            }
+
+        tx_hash, _receipt, _parsed = broadcast_router_calldata(client, wallet, router, calldata)
+        logger.info("live DEX leg mined tx=%s", tx_hash[:18])
+
         return {
             "success": True,
             "price": to_decimal(price),
             "filled": to_decimal(size_base_human),
             "tx_hash": tx_hash,
+            "dry_run": False,
         }
     except Exception as e:
         logger.exception("live DEX leg failed: %s", e)
@@ -228,4 +300,5 @@ def sync_execute_live_dex_leg(
             "price": signal.dex_price,
             "filled": Decimal("0"),
             "error": str(e),
+            "dry_run": dry_run,
         }

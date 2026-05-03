@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FAILURE_THRESHOLD = 3
 DEFAULT_WINDOW_S = 300.0
-DEFAULT_COOLDOWN_S = 600.0
+DEFAULT_COOLDOWN_S = 6000.0
 
 
 @dataclass
