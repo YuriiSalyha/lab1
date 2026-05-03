@@ -51,6 +51,7 @@ select = ["E", "F", "I", "B"]
 "scripts/inventory_dashboard.py" = ["E402", "I001"]
 "scripts/orderbook_ws_stream.py" = ["E402", "I001"]
 "scripts/portfolio_snapshot.py" = ["E402", "I001"]
+"scripts/arb_bot.py" = ["E402", "I001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -75,6 +76,8 @@ include = [
     "inventory*",
     "executor*",
     "strategy*",
+    "risk*",
+    "safety*",
     "monitoring*",
     "scripts*",
 ]
