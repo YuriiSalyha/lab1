@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -180,7 +181,7 @@ def test_affected_pool_addresses_and_mempool_callback() -> None:
     eng = _make_engine_with_pools([p])
     swap_ok = ParsedSwap(
         tx_hash="0x01",
-        router="0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+        router=DEFAULT_UNISWAP_V2_ROUTER.checksum,
         dex="UniswapV2",
         method="swapExactTokensForTokens",
         token_in=p.token0.address,
@@ -195,7 +196,7 @@ def test_affected_pool_addresses_and_mempool_callback() -> None:
 
     swap_miss = ParsedSwap(
         tx_hash="0x02",
-        router="0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+        router=DEFAULT_UNISWAP_V2_ROUTER.checksum,
         dex="UniswapV2",
         method="swapExactTokensForTokens",
         token_in=A3,
@@ -225,3 +226,113 @@ def test_load_pools_calls_from_chain() -> None:
     fc.assert_called_once_with(PAIR, client)
     assert eng.pools[PAIR] is fake
     assert eng.route_finder is not None
+
+
+# --- Math-only pair price quote ---------------------------------------------
+
+
+def test_get_pair_prices_math_returns_real_pool_prices() -> None:
+    """Math path must hit the constant-product formula, not a stub."""
+    p = _pair(r0=100 * 10**18, r1=200_000 * 10**6)  # WETH=100, USDC=200_000
+    eng = _make_engine_with_pools([p])
+    base = p.token0  # WETH
+    quote = p.token1  # USDC
+    size = Decimal("1")  # 1 WETH
+
+    dex_buy, dex_sell = eng.get_pair_prices_math(base, quote, size)
+
+    # Spot price = 200_000 / 100 = 2000 USDC/WETH. With ~0.3% fee + curvature,
+    # buying 1 WETH costs more than 2000 and selling yields less.
+    assert dex_sell < Decimal("2000") < dex_buy
+    # Sanity: differ by at most a few %, both within an order of magnitude.
+    assert Decimal("1900") < dex_sell < Decimal("2000")
+    assert Decimal("2000") < dex_buy < Decimal("2100")
+
+
+def test_get_pair_prices_math_is_size_dependent() -> None:
+    """Bigger sizes should impact the price more (slippage)."""
+    p = _pair(r0=100 * 10**18, r1=200_000 * 10**6)
+    eng = _make_engine_with_pools([p])
+    base = p.token0
+    quote = p.token1
+
+    small_buy, small_sell = eng.get_pair_prices_math(base, quote, Decimal("0.01"))
+    big_buy, big_sell = eng.get_pair_prices_math(base, quote, Decimal("5"))
+
+    # Buying more pushes the price you pay UP; selling more pushes the price
+    # you receive DOWN. Both sides must move past the small-size quote.
+    assert big_buy > small_buy
+    assert big_sell < small_sell
+
+
+def test_get_pair_prices_math_matches_pool_get_amount() -> None:
+    """Returned prices must equal the integer math from the pair directly."""
+    p = _pair(r0=100 * 10**18, r1=200_000 * 10**6)
+    eng = _make_engine_with_pools([p])
+    base, quote = p.token0, p.token1
+    size = Decimal("0.5")
+
+    dex_buy, dex_sell = eng.get_pair_prices_math(base, quote, size)
+
+    base_atoms = int(size * Decimal(10**base.decimals))
+    quote_in_atoms = p.get_amount_in(base_atoms, base)
+    quote_out_atoms = p.get_amount_out(base_atoms, base)
+    expected_buy = Decimal(quote_in_atoms) / Decimal(10**quote.decimals) / size
+    expected_sell = Decimal(quote_out_atoms) / Decimal(10**quote.decimals) / size
+
+    assert dex_buy == expected_buy
+    assert dex_sell == expected_sell
+
+
+def test_get_pair_prices_math_raises_when_no_pools() -> None:
+    eng = PricingEngine(MagicMock(), "http://x", "ws://x", SENDER)
+    base = _tok(A1, "WETH")
+    quote = _tok(A2, "USDC", 6)
+    with pytest.raises(QuoteError, match="No pools loaded"):
+        eng.get_pair_prices_math(base, quote, Decimal("1"))
+
+
+def test_get_pair_prices_math_raises_on_zero_size() -> None:
+    p = _pair()
+    eng = _make_engine_with_pools([p])
+    with pytest.raises(QuoteError, match="must be positive"):
+        eng.get_pair_prices_math(p.token0, p.token1, Decimal("0"))
+
+
+def test_get_pair_prices_math_resolves_eth_to_weth_pool() -> None:
+    """Resolver must accept CEX-style ETH symbol against a WETH pool."""
+    p = _pair(r0=10 * 10**18, r1=20_000 * 10**6)
+    eng = _make_engine_with_pools([p])
+    # Caller passes a pseudo-Token at a different address with symbol "ETH";
+    # the engine should match it to the WETH side via symbol_match.
+    eth_like = Token(
+        address=Address("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+        symbol="ETH",
+        decimals=18,
+    )
+    usdc = p.token1
+
+    dex_buy, dex_sell = eng.get_pair_prices_math(eth_like, usdc, Decimal("0.1"))
+
+    assert dex_sell < dex_buy
+    assert dex_sell > 0
+
+
+def test_refresh_pool_changes_math_quote() -> None:
+    """Refreshing reserves must change the math-only quote: not frozen."""
+    p_initial = _pair(PAIR, r0=100 * 10**18, r1=200_000 * 10**6)
+    eng = _make_engine_with_pools([p_initial])
+    base, quote = p_initial.token0, p_initial.token1
+    size = Decimal("1")
+
+    buy_before, sell_before = eng.get_pair_prices_math(base, quote, size)
+
+    # Simulate LPs adding USDC: same WETH reserve, more USDC -> price up.
+    p_updated = _pair(PAIR, r0=100 * 10**18, r1=240_000 * 10**6)
+    with patch.object(UniswapV2Pair, "from_chain", return_value=p_updated):
+        eng.refresh_pool(PAIR)
+
+    buy_after, sell_after = eng.get_pair_prices_math(base, quote, size)
+
+    assert buy_after > buy_before
+    assert sell_after > sell_before

@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from inventory.tracker import InventoryTracker, Venue
-from strategy.fees import FeeStructure
+from strategy.fees import FeeStructure, cex_taker_bps_from_ccxt_ratio
 from strategy.generator import SignalGenerator
 from strategy.scorer import (
     INVENTORY_OK_SCORE,
@@ -24,6 +24,18 @@ from strategy.scorer import (
 from strategy.signal import Direction, Signal, to_decimal
 
 # --- Fixtures ----------------------------------------------------------------
+
+
+def test_cex_taker_bps_from_ccxt_ratio() -> None:
+    assert cex_taker_bps_from_ccxt_ratio(Decimal("0.001")) == Decimal("10")
+    assert cex_taker_bps_from_ccxt_ratio("0.00075") == Decimal("7.5")
+
+
+def test_cex_taker_bps_from_ccxt_ratio_rejects_non_positive() -> None:
+    with pytest.raises(ValueError):
+        cex_taker_bps_from_ccxt_ratio(0)
+    with pytest.raises(ValueError):
+        cex_taker_bps_from_ccxt_ratio(Decimal("-0.001"))
 
 
 def _book(bid: Decimal, ask: Decimal) -> dict:

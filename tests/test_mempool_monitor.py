@@ -8,8 +8,9 @@ from eth_utils import to_checksum_address
 from chain.decoder import TransactionDecoder
 from pricing.mempool_monitor import MempoolMonitor
 from pricing.parsed_swap import try_parse_uniswap_v2_swap
+from pricing.pricing_engine import DEFAULT_UNISWAP_V2_ROUTER
 
-ROUTER = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+ROUTER = DEFAULT_UNISWAP_V2_ROUTER.checksum
 FROM = "0x2222222222222222222222222222222222222222"
 TOKEN_A = "0x1111111111111111111111111111111111111111"
 TOKEN_B = "0x3333333333333333333333333333333333333333"
