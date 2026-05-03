@@ -1,6 +1,6 @@
 # lab1
 
-Python toolkit for **Ethereum account handling**, **JSON-RPC access**, **transaction analysis**, **Uniswap V2–style pricing** (routing, fork simulation, mempool decoding), **CEX order books** (Binance testnet), **cross-venue inventory**, and an **arb readiness check** (DEX + CEX + inventory)—with deterministic JSON utilities, linting, and tests wired for local development.
+Python toolkit for **Ethereum account handling**, **JSON-RPC access**, **transaction analysis**, **Uniswap V2–style pricing** (routing, fork simulation, mempool decoding), **CEX order books** (Binance testnet or live via **`PRODUCTION`**), **cross-venue inventory**, an **arb readiness check** (**`scripts/arb_checker.py`**), and a **closed-loop arbitrage bot** (**`scripts/arb_bot.py`**) with **risk limits**, **kill switch**, **Telegram** alerts (optional), **CSV trade journal**, and **dry-run / signed-dry-run / live** execution paths—with deterministic JSON utilities, linting, and tests wired for local development.
 
 ## Features
 
@@ -38,7 +38,7 @@ See **[docs/Week2.md](docs/Week2.md)** for a full package overview. Local fork h
 
 ### `exchange/`
 
-- **`ExchangeClient`** — Binance (testnet) via CCXT: **`fetch_order_book`** and **`fetch_balance`** with **`Decimal`** fields, sliding-window **request weight** limiting, optional **IOC limit** orders.
+- **`ExchangeClient`** — Binance via CCXT: **testnet** when **`PRODUCTION=false`**, **live** spot when **`PRODUCTION=true`** (**`config.config`**). **`fetch_order_book`**, **`fetch_balance`**, **`get_trading_fees`**, **`max_taker_fee_bps_for_symbols`** (multi-pair taker → bps), all monetary fields as **`Decimal`**; sliding-window **request weight** limiting; optional **IOC limit** orders.
 - **`WeightRateLimiter`** — Binance-style IP weight budget per time window.
 - **`OrderBookAnalyzer` + CLI** — Walk the book for fills / slippage; **`python -m exchange.orderbook`** (or **`.\run.ps1 orderbook ETH/USDT`**).
 
@@ -51,6 +51,16 @@ See **[docs/Week2.md](docs/Week2.md)** for a full package overview. Local fork h
 ### `scripts/` — arb check
 
 - **`ArbChecker`** (**`scripts/arb_checker.py`**) — Combines a loaded **Uniswap V2** pool (**`PricingEngine.load_pools`**), **CEX** order book (**`ExchangeClient`**), and **inventory** preflight (**`InventoryTracker`**). Read-only; no trades. Run: **`python -m scripts.arb_checker ETH/USDT --size 2.0`** or **`python scripts/arb_checker.py ...`** (requires **`--rpc`**, **`--pool`** or **`ARB_V2_POOL`**, and Binance config for live balances).
+
+### `scripts/` — arbitrage bot (`arb_bot.py`)
+
+- **`ArbBot`** — Async loop: **`SignalGenerator`** + **`SignalScorer`** + **`Executor`**, **`RiskManager`**, file **kill switch**, optional **Telegram** (alerts + slash commands), **CSV** trade journal, optional **Prometheus** metrics, **circuit breaker** (webhook + Telegram on trip). Supports **`--demo`** (fully offline scripted run), **`--dry-run`** (no broadcast; **`ARB_DRY_RUN_MODE=signed`** builds and signs the DEX tx only), and **`--live`** with env-gated **DEX** router swaps.
+- **CEX fees** — Non-demo runs prefer **CCXT `fetch_trading_fee`** taker rates across **`--pairs`** (max bps), unless **`ARB_CEX_TAKER_BPS`** is set. See **[docs/Week5.md](docs/Week5.md)** and **`ARB_DRY_RUN_MODE`** in **`.env.example`**.
+
+```powershell
+python scripts/arb_bot.py --demo
+python scripts/arb_bot.py --pairs ETH/USDC --tick 2 --dry-run
+```
 
 See **[docs/Week3.md](docs/Week3.md)** for **`exchange`**, **`inventory`**, **`scripts.arb_checker`**, and CLI examples (order book, IOC trades, snapshots, arb checker, PnL). Quick PnL demo: `python scripts/pnl_demo.py`.
 
@@ -84,6 +94,7 @@ flowchart LR
 ```
 
 - **`ArbChecker`** reads **DEX** prices from pools loaded on **`PricingEngine`**, **CEX** quotes from **`ExchangeClient`**, and checks **`InventoryTracker.can_execute`** for both legs.
+- **`ArbBot`** (**`scripts/arb_bot.py`**) closes the loop: it scores signals, runs the **executor** (with simulation or live legs per config), enforces **`risk`** limits, and writes monitoring output (**logs**, **CSV**, optional **Telegram**). Overview: **[docs/Week5.md](docs/Week5.md)**; signal/executor details: **[docs/Week4.md](docs/Week4.md)**.
 - **`RebalancePlanner`** and **`PnLEngine`** are separate; they use the same **`inventory`** types for skew and recorded trade economics.
 
 ## Definition of done checklist
@@ -107,7 +118,7 @@ flowchart LR
 ## Requirements
 
 - **Python 3.10+**
-- Dependencies are listed in **`pyproject.toml`** (including `web3`, `eth-account`, `eth-abi`, `eth-utils`, `python-dotenv`). Dev tools (**`pytest`**, **`ruff`**, **`pre-commit`**) are optional extras: **`[dev]`**.
+- Dependencies are listed in **`pyproject.toml`** (including `web3`, `eth-account`, `eth-abi`, `eth-utils`, `python-dotenv`, `rich`, `websockets`, `ccxt`). Dev tools (**`pytest`**, **`ruff`**, **`pre-commit`**) are optional extras: **`[dev]`**; optional **`[metrics]`** installs **`prometheus-client`** for **`arb_bot.py`** when **`PROMETHEUS_METRICS_PORT`** is set.
 
 ## Setup and commands
 
@@ -132,7 +143,7 @@ First-time setup and macOS/Linux equivalents: **[docs/setup.md](docs/setup.md)**
 python -m scripts.arb_checker ETH/USDT --size 2.0 --rpc $env:MAINNET_RPC --pool 0xYourV2Pair
 ```
 
-Copy **`.env.example`** → **`.env`** when you need RPC URLs or secrets locally (see setup doc).
+Copy **`.env.example`** → **`.env`** when you need RPC URLs or secrets locally (see setup doc). For **`arb_bot.py`**, the example file documents **`ARB_*`**, **`DEX_*`**, **`TELEGRAM_*`**, **`ARB_CEX_TAKER_BPS`**, and related variables.
 
 ### Integration tests (Sepolia)
 
@@ -185,11 +196,16 @@ Requires a funded Sepolia wallet (faucet: https://sepoliafaucet.com/). See **[do
 | `chain/` | RPC client, builder, decoder, Uniswap V2 router codec, analyzer CLI |
 | `pricing/` | AMM pairs, routing, price impact, mempool monitor, fork simulator, pricing engine |
 | `exchange/` | Binance (testnet) client, rate limiter, order book analyzer CLI |
-| `inventory/` | Cross-venue tracker, rebalance planner, PnL engine |
-| `config/` | Shared config (e.g. `BINANCE_CONFIG` from env) |
-| `tests/` | Pytest suite (`core`, `chain`, `pricing`, `exchange`, `inventory`, `scripts.arb_checker`) |
-| `scripts/` | Sepolia integration; `start_fork.ps1`; pricing CLIs; **`arb_checker.py`** (DEX + CEX + inventory) |
-| `docs/` | Setup, **[Week1.md](docs/Week1.md)**, **[Week2.md](docs/Week2.md)**, **[Week3.md](docs/Week3.md)** |
+| `inventory/` | Cross-venue tracker, rebalance planner, PnL engine, **`usd_mark`** (reference USD for portfolio estimates) |
+| `strategy/` | Signals, fees, generator, scorer (see **[docs/Week4.md](docs/Week4.md)**) |
+| `executor/` | Two-leg executor, circuit breaker, replay protection, live DEX leg (see **[docs/Week4.md](docs/Week4.md)**) |
+| `risk/` | Soft limits, **`RiskManager`**, kill switch, pre-trade validation, safety rails |
+| `monitoring/` | Telegram, trade CSV journal, health/metrics helpers, bot logging setup |
+| `safety/` | Compatibility re-exports for **`risk.kill_switch`** |
+| `config/` | Shared config (`BINANCE_CONFIG`, **`BYBIT_CONFIG`**, **`PRODUCTION`**) |
+| `tests/` | Pytest suite (includes **`arb_bot`**, risk, monitoring, executor, strategy) |
+| `scripts/` | Sepolia integration; `start_fork.ps1`; pricing CLIs; **`arb_checker.py`**; **`arb_bot.py`** (live / dry-run / demo) |
+| `docs/` | Setup, **[Week1.md](docs/Week1.md)**–**[Week5.md](docs/Week5.md)**; optional **`PREFLIGHT_CHECKLIST.md`** |
 
 ## Tooling
 
