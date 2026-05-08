@@ -1,6 +1,11 @@
 """Non-configurable hard ceilings for live trading safety.
 
-These literals are intentionally **not** read from the environment.
+These literals are intentionally **not** read from the environment. The
+``total_capital`` argument to :func:`safety_check` is the **combined**
+DEX (wallet) + CEX USD value from :func:`inventory.usd_mark.estimate_inventory_usd_live`
+in live mode (or :func:`inventory.usd_mark.estimate_inventory_usd` in demo).
+Live pricing may raise :exc:`inventory.usd_mark.LiveUsdMarkError` before this
+function runs.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ def safety_check(
     total_capital: Decimal,
     trades_this_hour: int,
 ) -> tuple[bool, str]:
-    """Final gate after soft risk checks. 'daily_pnl' is a sum of today's net PnL"""
+    """See module docstring for ``total_capital`` semantics."""
     if trade_usd > ABSOLUTE_MAX_TRADE_USD:
         return False, f"trade_usd {trade_usd} exceeds absolute max {ABSOLUTE_MAX_TRADE_USD}"
     if daily_pnl <= -ABSOLUTE_MAX_DAILY_LOSS:

@@ -179,8 +179,8 @@ def test_orderbook_weight_brackets():
     assert orderbook_request_weight(200) == 25
 
 
-def test_orderbook_weight_for_exchange_bybit():
-    assert orderbook_request_weight_for_exchange("bybit", 500) == 1
+def test_orderbook_weight_for_exchange_okx():
+    assert orderbook_request_weight_for_exchange("okx", 500) == 1
 
 
 def test_exchange_id_rejected():

@@ -65,16 +65,20 @@ def _fee_usd(asset: str, fee_amt: Decimal) -> Decimal:
     return fee_amt * REFERENCE_USD_PER_STABLE
 
 
+def _pct_decimal(x: Decimal | float | str | int) -> Decimal:
+    return x if isinstance(x, Decimal) else Decimal(str(x))
+
+
 def _normalize_target_ratio(
     venues: list[Venue],
-    target_ratio: dict[Venue, float] | None,
+    target_ratio: dict[Venue, Decimal | float | str] | None,
 ) -> dict[Venue, Decimal]:
     if not venues:
         return {}
     if target_ratio is None:
         w = Decimal("1") / Decimal(len(venues))
         return {v: w for v in venues}
-    raw = {v: Decimal(str(target_ratio.get(v, 0.0))) for v in venues}
+    raw = {v: _pct_decimal(target_ratio.get(v, Decimal("0"))) for v in venues}
     s = sum(raw.values(), Decimal("0"))
     if s <= 0:
         w = Decimal("1") / Decimal(len(venues))
@@ -91,11 +95,11 @@ class RebalancePlanner:
     def __init__(
         self,
         tracker: InventoryTracker,
-        threshold_pct: float = 30.0,
-        target_ratio: dict[Venue, float] | None = None,
+        threshold_pct: Decimal | float | str = 30,
+        target_ratio: dict[Venue, Decimal | float | str] | None = None,
     ):
         self._tracker = tracker
-        self._threshold = float(threshold_pct)
+        self._threshold = _pct_decimal(threshold_pct)
         self._target_ratio = target_ratio
 
     def _targets(self, asset: str) -> tuple[dict[Venue, Decimal], Decimal, dict[Venue, Decimal]]:

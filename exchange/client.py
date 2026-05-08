@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 # Allowlisted ccxt exchange ids (lowercase constructor names).
-SUPPORTED_CCXT_IDS = frozenset({"binance", "bybit"})
+SUPPORTED_CCXT_IDS = frozenset({"binance", "bybit", "okx"})
 
 # Non-Binance exchanges: conservative fixed weight for local rate limiter (no Binance IP headers).
 BYBIT_FETCH_ORDERBOOK_WEIGHT = 1
@@ -56,7 +56,7 @@ def orderbook_request_weight_for_exchange(exchange_id: str, limit: int) -> int:
     """REST weight for ``fetch_order_book`` (Binance table; other venues use a fixed weight)."""
     if exchange_id == "binance":
         return orderbook_request_weight(limit)
-    if exchange_id in SUPPORTED_CCXT_IDS:
+    if exchange_id in ("bybit", "okx"):
         return BYBIT_FETCH_ORDERBOOK_WEIGHT
     raise ValueError(f"unsupported exchange_id: {exchange_id!r}")
 
@@ -78,7 +78,7 @@ class ExchangeClient:
         """
         Initialize with CCXT config (apiKey, secret, sandbox, options, ...).
 
-        ``exchange_id``: ``"binance"`` or ``"bybit"`` (see ``SUPPORTED_CCXT_IDS``).
+        ``exchange_id``: ``"binance"``, ``"bybit"``, or ``"okx"`` (see ``SUPPORTED_CCXT_IDS``).
 
         Optional keys in ``config``:
 

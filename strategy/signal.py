@@ -1,20 +1,37 @@
 """Signal dataclass + helpers for arbitrage opportunity representation.
 
 All monetary, spread, size, and score fields are :class:`~decimal.Decimal` so
-every downstream calculation stays exact. Timestamps remain ``float`` seconds
-(they are durations, not money, and matching ``time.time()``).
+every downstream calculation stays exact. ``timestamp`` / ``expiry`` are
+``float`` epoch seconds from :func:`time.time` (OS clocks); they are not used in
+money arithmetic.
 """
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
-DEFAULT_SIGNAL_TTL_S = 5.0
+_ENV_ALLOW_NEGATIVE_PNL_USD = "ARB_ALLOW_NEGATIVE_PNL_USD"
+
+
+def _negative_pnl_floor() -> Decimal:
+    """Optional non-positive floor read at call time (env may change at runtime)."""
+    raw = os.getenv(_ENV_ALLOW_NEGATIVE_PNL_USD, "").strip()
+    if not raw:
+        return Decimal("0")
+    try:
+        v = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        return Decimal("0")
+    return v if v < 0 else Decimal("0")
+
+
+DEFAULT_SIGNAL_TTL_S = Decimal("5")
 SIGNAL_ID_HEX_LEN = 8
 SCORE_MIN = Decimal("0")
 SCORE_MAX = Decimal("100")
@@ -115,8 +132,13 @@ class Signal:
             reasons.append("inventory")
         if not self.within_limits:
             reasons.append("notional_limit")
-        if self.expected_net_pnl <= Decimal("0"):
-            reasons.append("non_positive_expected_net_pnl")
+        floor = _negative_pnl_floor()
+        if floor < 0:
+            if self.expected_net_pnl < floor:
+                reasons.append("below_negative_pnl_floor")
+        else:
+            if self.expected_net_pnl <= Decimal("0"):
+                reasons.append("non_positive_expected_net_pnl")
         if self.score <= SCORE_MIN:
             reasons.append("score_not_above_minimum")
         return reasons

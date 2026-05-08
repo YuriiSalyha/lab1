@@ -184,6 +184,9 @@ cython_debug/
 # Visual Studio Code (local user settings)
 .vscode/
 
+# Kill-switch sentinel (scripts/arb_bot.py — delete file to clear; do not commit)
+arb_bot_kill
+
 # Application runtime logs (see core.logging_config)
 logs/
 

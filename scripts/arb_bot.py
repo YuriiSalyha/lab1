@@ -3,9 +3,9 @@
 Run modes:
 
 - ``python scripts/arb_bot.py --demo``
-    Uses a fully offline ``MockExchange`` + stub pricing so the main loop
-    exercises every state transition without real credentials or RPC. The bot
-    walks one deterministic ``DEMO_SCRIPT_SPREAD_BPS`` sequence (both arb
+    Uses a fully offline ``MockExchange`` with patched DEX triplets (buy/sell/spot) so
+    the main loop exercises every state transition without real credentials or RPC.
+    The bot walks one deterministic ``DEMO_SCRIPT_SPREAD_BPS`` sequence (both arb
     directions across ``ETH/USDT`` and ``BTC/USDT``), updates mock balances on
     each success, prints a PnL summary, then **exits** (no infinite loop).
 - ``python scripts/arb_bot.py``
@@ -16,11 +16,12 @@ Run modes:
     alerts, optional Telegram slash commands (``TELEGRAM_CONTROLS_ENABLED=1``), and
     soft/hard risk limits (see ``risk/`` package).
     If ``ETH_RPC_URL`` or ``RPC_ENDPOINT`` is set, the bot constructs :class:`PricingEngine`, loads
-    Uniswap V2 pools from ``ARB_V2_POOLS`` (comma-separated ``0x`` addresses) or
-    built-in Arbitrum One defaults (WETH/USDT + WBTC/WETH), and wires
+    Uniswap V2 pools from ``V2_POOLS`` / ``V2_POOL`` / ``ARB_V2_POOLS`` (comma-separated ``0x``
+    addresses; first non-empty wins) or built-in Arbitrum One Uniswap V2 defaults (WETH/USDT,
+    WBTC/WETH), and wires
     ``token_resolver`` so the generator uses on-chain :meth:`PricingEngine.get_quote`
     prices (fork RPC must be reachable for quote simulation). If setup fails or
-    env is unset, DEX legs use stub prices derived from the CEX book.
+    env is unset, the generator raises when DEX quotes are required (no CEX-mid stub).
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ import time
 from dotenv import load_dotenv
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Optional
 
@@ -61,7 +62,12 @@ from executor.webhook_alerts import (  # noqa: E402
 )
 from inventory.pnl import ArbRecord, PnLEngine, TradeLeg  # noqa: E402
 from inventory.tracker import InventoryTracker, Venue  # noqa: E402
-from inventory.usd_mark import estimate_inventory_usd  # noqa: E402
+from inventory.usd_mark import (  # noqa: E402
+    LiveUsdMarkError,
+    estimate_inventory_usd,
+    estimate_inventory_usd_live,
+    snapshot_pair_mtm_usd,
+)
 from monitoring.daily_summary import generate_daily_summary  # noqa: E402
 from monitoring.health_state import (
     BotHealth,
@@ -89,7 +95,7 @@ from risk.limits import RiskLimits  # noqa: E402
 from risk.manager import RiskManager  # noqa: E402
 from risk.pre_trade import PreTradeValidator  # noqa: E402
 from risk.safety import ABSOLUTE_MIN_CAPITAL  # noqa: E402
-from strategy.fees import DEFAULT_CEX_TAKER_BPS, FeeStructure  # noqa: E402
+from strategy.fees import BPS_DENOM, DEFAULT_CEX_TAKER_BPS, FeeStructure  # noqa: E402
 from strategy.generator import SignalGenerator  # noqa: E402
 from strategy.scorer import SignalScorer  # noqa: E402
 from strategy.signal import Direction, Signal, to_decimal  # noqa: E402
@@ -101,10 +107,29 @@ DEFAULT_TICK_SECONDS = 1.0
 DEFAULT_ERROR_BACKOFF_SECONDS = 5.0
 DEFAULT_PAIR = "ETH/USDT"
 
-# Arbitrum One Uniswap V2 pairs (factory 0xf1D7...) when ARB_V2_POOLS is unset.
+
+def _env_v2_pools_csv() -> str:
+    """Comma-separated V2 pair addresses. ``V2_POOLS`` then ``V2_POOL`` then ``ARB_V2_POOLS``."""
+    for key in ("V2_POOLS", "V2_POOL", "ARB_V2_POOLS"):
+        raw = os.getenv(key, "").strip()
+        if raw:
+            return raw
+    return ""
+
+
+def _env_v3_pools_csv() -> str:
+    """Comma-separated V3 pool addresses. ``V3_POOLS`` then ``V3_POOL`` then ``ARB_V3_POOLS``."""
+    for key in ("V3_POOLS", "V3_POOL", "ARB_V3_POOLS"):
+        raw = os.getenv(key, "").strip()
+        if raw:
+            return raw
+    return ""
+
+
+# Arbitrum One V2 pairs when no pool env is set: all on Uniswap V2.
 _DEFAULT_ARB_V2_POOLS: tuple[Address, ...] = (
-    Address("0xd04Bc65744306A5C149414dd3CD5c984D9d3470d"),  # WETH/USDT
-    Address("0x8c1D83A25eE2dA1643A5d937562682b1aC6C856B"),  # WBTC/WETH
+    Address("0xd04Bc65744306A5C149414dd3CD5c984D9d3470d"),  # Uniswap WETH/USDT
+    Address("0x8c1D83A25eE2dA1643A5d937562682b1aC6C856B"),  # Uniswap WBTC/WETH
 )
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 LOG_DATE_FMT = "%Y-%m-%d %H:%M:%S"
@@ -120,7 +145,8 @@ DEMO_PAIR_MID: dict[str, Decimal] = {
 # Each tick applies (spread_a_bps, spread_b_bps) vs the CEX book:
 #   spread_a → BUY_CEX_SELL_DEX edge: dex_sell = cex_ask * (1 + spread_a/10000)
 #   spread_b → BUY_DEX_SELL_CEX edge: dex_buy = cex_bid / (1 + spread_b/10000)
-# The generator picks the better direction when both edges are ≥ min_spread_bps.
+# The generator picks a direction when reserve spot vs CEX meets min_spread_bps:
+# for positive m, spot edge ≥ m bps or ≤ −m bps (|edge| ≥ m); else legacy ≥ m only.
 DEMO_SCRIPT_SPREAD_BPS: tuple[tuple[Decimal, Decimal], ...] = (
     (Decimal("82"), Decimal("24")),  # CEX-buy route wins
     (Decimal("20"), Decimal("68")),  # DEX-buy route wins
@@ -150,8 +176,8 @@ DEMO_SIGNAL_CONFIG = {
     # Very low floor so both "execute" and "score-too-low" scenarios generate.
     "min_profit_usd": Decimal("0.001"),
     "max_position_usd": Decimal("50000"),
-    "signal_ttl_seconds": 5.0,
-    "cooldown_seconds": 0.0,
+    "signal_ttl_seconds": 5,
+    "cooldown_seconds": 0,
 }
 
 logger = logging.getLogger("arb_bot")
@@ -204,24 +230,43 @@ def _resolve_live_fee_structure(exchange: Any, pairs: list[str]) -> FeeStructure
 
 def _apply_signal_generator_env_overrides(cfg: dict[str, Any]) -> None:
     """Tune :class:`~strategy.generator.SignalGenerator` without code edits (live/dry-run)."""
-    mapping: tuple[tuple[str, str, str], ...] = (
-        ("ARB_MIN_SPREAD_BPS", "min_spread_bps", "decimal"),
-        ("ARB_MIN_PROFIT_USD", "min_profit_usd", "decimal"),
-        ("ARB_MAX_POSITION_USD", "max_position_usd", "decimal"),
-        ("ARB_SIGNAL_TTL_SECONDS", "signal_ttl_seconds", "float"),
-        ("ARB_SIGNAL_COOLDOWN_SECONDS", "cooldown_seconds", "float"),
+    mapping: tuple[tuple[str, str], ...] = (
+        ("ARB_MIN_SPREAD_BPS", "min_spread_bps"),
+        ("ARB_MIN_PROFIT_USD", "min_profit_usd"),
+        ("ARB_MAX_POSITION_USD", "max_position_usd"),
+        ("ARB_MIN_TRADE_USD", "min_trade_usd"),
+        ("ARB_MAX_TRADE_USD", "max_trade_usd"),
+        ("ARB_SIGNAL_TTL_SECONDS", "signal_ttl_seconds"),
+        ("ARB_SIGNAL_COOLDOWN_SECONDS", "cooldown_seconds"),
     )
-    for env_name, key, kind in mapping:
+    for env_name, key in mapping:
         raw = os.getenv(env_name, "").strip()
         if not raw:
             continue
         try:
-            if kind == "decimal":
-                cfg[key] = to_decimal(raw)
-            else:
-                cfg[key] = float(raw)
+            cfg[key] = to_decimal(raw)
         except Exception as exc:
             logger.warning("ignored invalid %s=%r (%s)", env_name, raw, exc)
+
+
+_ENV_CEX_EXCHANGE = "ARB_CEX_EXCHANGE"
+
+
+def _resolve_cex_venue_and_client() -> tuple[Venue, Any]:
+    """Build CCXT client and matching :class:`~inventory.tracker.Venue` from `ARB_CEX_EXCHANGE`."""
+    from config.config import BINANCE_CONFIG, BYBIT_CONFIG, OKX_CONFIG
+    from exchange.client import ExchangeClient
+
+    raw = (os.getenv(_ENV_CEX_EXCHANGE, "binance") or "binance").strip().lower()
+    if raw == "binance":
+        return Venue.BINANCE, ExchangeClient(BINANCE_CONFIG, exchange_id="binance")
+    if raw == "bybit":
+        return Venue.BYBIT, ExchangeClient(BYBIT_CONFIG, exchange_id="bybit")
+    if raw == "okx":
+        return Venue.OKX, ExchangeClient(OKX_CONFIG, exchange_id="okx")
+    raise ValueError(
+        f"unsupported {_ENV_CEX_EXCHANGE}={raw!r}; use binance, bybit, or okx",
+    )
 
 
 _ENV_TELEGRAM_NOTIFY_OPPORTUNITIES = "ARB_TELEGRAM_NOTIFY_OPPORTUNITIES"
@@ -257,9 +302,17 @@ _DEFAULT_POOL_REFRESH_SECONDS = 5.0
 # Symbol aliases the inventory tracker uses when it queries a CEX-style ticker
 # against an on-chain ERC20 reading (Binance trades ETH/BTC, on-chain liquidity
 # uses WETH/WBTC). Keep keys uppercase.
+#
+# ``USD₮0`` (Tether glyph U+20AE) and ``USDT0`` are the bridged-Tether symbols
+# on Arbitrum One; both must map to plain ``USDT`` so the strategy's inventory
+# check (``get_available(wallet, "USDT")``) finds them under the same key the
+# pair string uses.
 _WALLET_SYMBOL_ALIASES: dict[str, str] = {
     "WETH": "ETH",
     "WBTC": "BTC",
+    "USD\u20ae0": "USDT",  # USD₮0 (Tether glyph U+20AE)
+    "USDT0": "USDT",
+    "USDT.E": "USDT",
 }
 
 
@@ -286,16 +339,17 @@ def _format_telegram_startup(config: ArbBotConfig) -> str:
     exec_label = "simulation (no live DEX legs)" if config.simulation else "live execution path"
     pairs = ",".join(config.pairs)
     tick_s = f"{config.tick_seconds:g}"
-    return "\n".join(
-        [
-            "<b>Arb bot started</b>",
-            f"time: <code>{html_escape_text(ts)}</code>",
-            f"flags: <code>{html_escape_text(','.join(flags) or 'none')}</code>",
-            f"executor: <code>{html_escape_text(exec_label)}</code>",
-            f"tick_s: <code>{html_escape_text(tick_s)}</code>",
-            f"pairs: <code>{html_escape_text(pairs)}</code>",
-        ],
-    )
+    cex = (os.getenv("ARB_CEX_EXCHANGE", "binance") or "binance").strip().lower()
+    lines = [
+        "<b>Arb bot started</b>",
+        f"time: <code>{html_escape_text(ts)}</code>",
+        f"flags: <code>{html_escape_text(','.join(flags) or 'none')}</code>",
+        f"executor: <code>{html_escape_text(exec_label)}</code>",
+        f"tick_s: <code>{html_escape_text(tick_s)}</code>",
+        f"pairs: <code>{html_escape_text(pairs)}</code>",
+        f"cex: <code>{html_escape_text(cex)}</code>",
+    ]
+    return "\n".join(lines)
 
 
 def _format_telegram_stopped_line() -> str:
@@ -386,6 +440,14 @@ def _apply_cex_virtual_overrides(
     return out
 
 
+def _format_bps_screen(value: Optional[Decimal]) -> str:
+    """Basis points for UI: whole bps (not fractional float-style)."""
+    if value is None:
+        return "N/A"
+    d = to_decimal(value)
+    return str(int(d.quantize(Decimal("1"), rounding=ROUND_HALF_UP)))
+
+
 def _format_dec(value: Optional[Decimal], places: int) -> str:
     """Render a Decimal with fixed places, or ``N/A`` for ``None``."""
     if value is None:
@@ -398,7 +460,18 @@ def _format_dec(value: Optional[Decimal], places: int) -> str:
     try:
         return f"{d.quantize(quant):f}"
     except Exception:
-        return f"{float(d):.{places}f}"
+        return str(d)
+
+
+def _format_usd_profit(value: Optional[Decimal]) -> str:
+    """USD for console: ``$1.23`` or ``-$1.23`` (never ``$-1.23``)."""
+    if value is None:
+        return "$0.00"
+    d = to_decimal(value)
+    body = _format_dec(abs(d), 2)
+    if d < 0:
+        return f"-${body}"
+    return f"${body}"
 
 
 def format_dryrun_console_line(
@@ -409,54 +482,116 @@ def format_dryrun_console_line(
     *,
     base_symbol: Optional[str] = None,
 ) -> str:
-    """One-line per-tick summary used by both dry-run modes (and live)."""
+    """One-line per-tick summary used by both dry-run modes (and live).
+
+    The **dex** field prefers **``dex_spot``** (reserve quote/base — marginal pool
+    price) when present; ``spread`` with no signal is spot vs ``cex_mid`` bps.
+    With a signal, ``spread`` stays ``Signal.spread_bps`` (execution at size).
+    """
     base = base_symbol or pair.split("/")[0]
     if snapshot is None:
         return (
             f"{pair} | bid N/A | ask N/A | dex N/A | spread N/A bps | "
-            f"est_profit $0.00 | sent={sent}"
+            f"est_profit {_format_usd_profit(None)} | sent={sent}"
         )
     bid = snapshot.get("cex_bid")
     ask = snapshot.get("cex_ask")
     bid_size = snapshot.get("cex_bid_size")
     ask_size = snapshot.get("cex_ask_size")
-    if signal is not None and signal.direction == Direction.BUY_DEX_SELL_CEX:
-        dex_price = snapshot.get("dex_buy")
-    elif signal is not None and signal.direction == Direction.BUY_CEX_SELL_DEX:
-        dex_price = snapshot.get("dex_sell")
-    else:
-        # No signal yet: report the better of the two DEX quotes (whichever is
-        # closer to crossing the CEX book) so the operator still sees a number.
-        buy = snapshot.get("dex_buy")
-        sell = snapshot.get("dex_sell")
-        dex_price = sell if (buy is None or (sell is not None and sell > buy)) else buy
-
     spread_bps: Optional[Decimal]
-    if signal is not None:
-        # ``Signal.spread_bps`` is the directional edge the generator picked.
-        spread_bps = signal.spread_bps
+    spot_raw = snapshot.get("dex_spot")
+    try:
+        spot_d = to_decimal(spot_raw) if spot_raw is not None else Decimal("0")
+    except Exception:
+        spot_d = Decimal("0")
+
+    # DEX column: reserve **spot** (quote/base from pool reserves) — marginal reference
+    # price, not the size-averaged execution average for a large notional.
+    if spot_d > 0:
+        dex_price = spot_d
+        dex_src = "spot"
     else:
-        # No signal: render the best-edge bps observed against CEX mid as a
-        # quick "how close are we to a tradable spread?" indicator.
+        dex_src = snapshot.get("dex_source") or "?"
+        if signal is not None and signal.direction == Direction.BUY_DEX_SELL_CEX:
+            dex_price = snapshot.get("dex_buy")
+        elif signal is not None and signal.direction == Direction.BUY_CEX_SELL_DEX:
+            dex_price = snapshot.get("dex_sell")
+        else:
+            buy = snapshot.get("dex_buy")
+            sell = snapshot.get("dex_sell")
+            cex_bid = snapshot.get("cex_bid")
+            cex_ask = snapshot.get("cex_ask")
+            if (
+                buy is not None
+                and sell is not None
+                and cex_bid is not None
+                and cex_ask is not None
+                and buy > 0
+                and cex_ask > 0
+            ):
+                spread_buy_cex_sell_dex = (sell - cex_ask) / cex_ask * BPS_DENOM
+                spread_buy_dex_sell_cex = (cex_bid - buy) / buy * BPS_DENOM
+                if spread_buy_cex_sell_dex >= spread_buy_dex_sell_cex:
+                    dex_price = sell
+                else:
+                    dex_price = buy
+            elif buy is not None:
+                dex_price = buy
+            else:
+                dex_price = sell
+
+    if signal is not None:
+        spread_bps = signal.spread_bps
+    elif spot_d > 0:
         cex_mid = snapshot.get("cex_mid") or Decimal("0")
-        if dex_price is not None and cex_mid > 0:
-            spread_bps = (
-                (to_decimal(dex_price) - to_decimal(cex_mid))
-                / to_decimal(cex_mid)
-                * Decimal("10000")
-            )
+        if cex_mid > 0:
+            spread_bps = (spot_d - cex_mid) / cex_mid * BPS_DENOM
         else:
             spread_bps = None
-    est_profit = signal.expected_net_pnl if signal is not None else Decimal("0")
+    else:
+        buy = snapshot.get("dex_buy")
+        sell = snapshot.get("dex_sell")
+        cex_bid = snapshot.get("cex_bid")
+        cex_ask = snapshot.get("cex_ask")
+        spread_bps = None
+        if (
+            buy is not None
+            and sell is not None
+            and cex_bid is not None
+            and cex_ask is not None
+            and buy > 0
+            and cex_ask > 0
+        ):
+            spread_buy_cex_sell_dex = (sell - cex_ask) / cex_ask * BPS_DENOM
+            spread_buy_dex_sell_cex = (cex_bid - buy) / buy * BPS_DENOM
+            spread_bps = (
+                spread_buy_cex_sell_dex
+                if spread_buy_cex_sell_dex >= spread_buy_dex_sell_cex
+                else spread_buy_dex_sell_cex
+            )
+    if signal is not None:
+        est_profit = signal.expected_net_pnl
+    else:
+        est_profit = snapshot.get("hypothetical_net_pnl_usd")
 
-    dex_src = snapshot.get("dex_source") or "?"
+    est_suffix = ""
+    if signal is not None:
+        sell_venue = "DEX" if signal.direction == Direction.BUY_CEX_SELL_DEX else "CEX"
+        est_suffix = f" (sell {_format_dec(signal.size, 6)} {base} on {sell_venue})"
+    else:
+        h_amt = snapshot.get("hypothetical_size_base")
+        h_sym = snapshot.get("hypothetical_sell_symbol")
+        h_ven = snapshot.get("hypothetical_sell_venue")
+        if h_amt is not None and h_sym and h_ven:
+            est_suffix = f" (sell {_format_dec(h_amt, 6)} {h_sym} on {h_ven})"
+
     return (
         f"{pair} | "
         f"bid {_format_dec(bid, 2)} x {_format_dec(bid_size, 4)} {base} | "
         f"ask {_format_dec(ask, 2)} x {_format_dec(ask_size, 4)} {base} | "
         f"dex {_format_dec(dex_price, 2)} ({dex_src}) | "
-        f"spread {_format_dec(spread_bps, 2)} bps | "
-        f"est_profit ${_format_dec(est_profit, 2)} | "
+        f"spread {_format_bps_screen(spread_bps)} bps | "
+        f"est_profit {_format_usd_profit(est_profit)}{est_suffix} | "
         f"sent={sent}"
     )
 
@@ -814,14 +949,18 @@ class ArbBot:
 
         if config.demo:
             self.exchange: Any = MockExchange()
+            self._cex_venue = Venue.BINANCE
         else:
-            from config.config import BINANCE_CONFIG  # local import avoids demo dep
-            from exchange.client import ExchangeClient
-
-            self.exchange = ExchangeClient(BINANCE_CONFIG, exchange_id="binance")
+            self._cex_venue, self.exchange = _resolve_cex_venue_and_client()
+            logger.info(
+                "CEX client: ARB_CEX_EXCHANGE=%s venue=%s ccxt_id=%s",
+                os.getenv(_ENV_CEX_EXCHANGE, "binance").strip().lower() or "binance",
+                self._cex_venue.value,
+                getattr(self.exchange, "exchange_id", "?"),
+            )
             self._maybe_init_pricing_engine()
 
-        self.inventory = InventoryTracker([Venue.BINANCE, Venue.WALLET])
+        self.inventory = InventoryTracker([self._cex_venue, Venue.WALLET])
         self.pnl_engine = PnLEngine()
         self._cumulative_arb_pnl: Decimal = Decimal("0")
         self._session_portfolio_start_usd: Optional[Decimal] = None
@@ -847,16 +986,20 @@ class ArbBot:
             self.fees,
             signal_cfg,
             token_resolver=self._token_resolver,
+            cex_venue=self._cex_venue,
         )
         if config.demo:
             self._rewire_demo_dex_prices()
         self.scorer = SignalScorer()
 
         logger.info(
-            "Signal thresholds: min_spread_bps=%s min_profit_usd=%s max_position_usd=%s "
-            "cooldown_s=%s min_score=%s dry_run=%s cex_taker_bps=%s",
+            "Signal thresholds: min_spread_bps=%s min_profit_usd=%s "
+            "trade_usd_band=[%s, %s] max_position_usd=%s cooldown_s=%s "
+            "min_score=%s dry_run=%s cex_taker_bps=%s",
             self.generator.min_spread_bps,
             self.generator.min_profit_usd,
+            self.generator.min_trade_usd,
+            self.generator.max_trade_usd if self.generator.max_trade_usd is not None else "∞",
             self.generator.max_position_usd,
             self.generator.cooldown,
             config.min_score,
@@ -973,8 +1116,10 @@ class ArbBot:
         if not isinstance(mock, MockExchange):
             return
 
-        def demo_dex_prices(pair, size, cex_bid, cex_ask):
-            return mock.current_dex_buy, mock.current_dex_sell
+        def demo_dex_prices(pair: str, size: Decimal, cex_bid: Decimal, cex_ask: Decimal):
+            b, s = mock.current_dex_buy, mock.current_dex_sell
+            spot = (b + s) / Decimal("2")
+            return b, s, spot
 
         self.generator._fetch_dex_prices = demo_dex_prices  # type: ignore[assignment]
 
@@ -998,27 +1143,107 @@ class ArbBot:
                 ws_url,
                 quote_sender,
             )
-            raw = os.getenv("ARB_V2_POOLS", "").strip()
+            raw = _env_v2_pools_csv()
             if raw:
                 pool_addrs = [Address.from_string(x.strip()) for x in raw.split(",") if x.strip()]
             else:
                 pool_addrs = list(_DEFAULT_ARB_V2_POOLS)
             if not pool_addrs:
-                logger.warning("ARB_V2_POOLS is empty; continuing without on-chain pools")
+                logger.warning(
+                    "V2_POOLS / V2_POOL are all empty; continuing without on-chain pools",
+                )
                 self.chain_client = None
                 self.pricing_engine = None
                 return
             self.pricing_engine.load_pools(pool_addrs)
+            self._maybe_load_v3_pools()
             self._token_resolver = token_resolver_from_pricing_engine(self.pricing_engine)
             logger.info(
-                "PricingEngine: loaded %d Uniswap V2 pool(s); generator uses on-chain DEX quotes",
+                "PricingEngine: loaded %d Uniswap V2 pool(s) and %d Uniswap V3 pool(s); "
+                "generator uses on-chain DEX quotes",
                 len(self.pricing_engine.pools),
+                len(self.pricing_engine.v3_pools),
             )
         except Exception as exc:
             logger.warning("PricingEngine setup failed (%s); continuing without DEX quotes", exc)
             self.chain_client = None
             self.pricing_engine = None
             self._token_resolver = None
+
+    def _maybe_load_v3_pools(self) -> None:
+        """Best-effort load of Uniswap V3 pools when activated via env.
+
+        Activation:
+          * ``V3_POOLS`` / ``V3_POOL`` / ``ARB_V3_POOLS`` (CSV of pool addresses) — explicit list.
+          * ``V3_AUTO_DISCOVER=1`` — for every loaded V2 pool's ``(token0, token1)`` pair,
+            call ``factory.getPool`` for fee tiers 500 / 3000 / 10000 and register every
+            non-zero pool found.
+
+        Failures are logged but never abort engine startup; the V2 path keeps running
+        unchanged. Quoter/factory addresses come from
+        ``UNISWAP_V3_QUOTER_V2`` / ``UNISWAP_V3_FACTORY`` (defaults: mainnet deployments).
+        """
+        if self.pricing_engine is None:
+            return
+        quoter_override = os.getenv("UNISWAP_V3_QUOTER_V2", "").strip() or None
+        factory_override = os.getenv("UNISWAP_V3_FACTORY", "").strip() or None
+
+        explicit = _env_v3_pools_csv()
+        if explicit:
+            try:
+                addrs = [Address.from_string(x.strip()) for x in explicit.split(",") if x.strip()]
+                self.pricing_engine.load_pools_v3(addrs, quoter_address=quoter_override)
+                logger.info("Loaded %d Uniswap V3 pool(s) from V3_POOLS env", len(addrs))
+            except Exception as exc:
+                logger.warning("V3 explicit pool load failed (%s); skipping V3", exc)
+            return
+
+        if not _env_truthy("V3_AUTO_DISCOVER"):
+            return
+
+        try:
+            from pricing.uniswap_v3_discovery import pools_for_pair
+        except Exception as exc:
+            logger.warning("V3 auto-discover unavailable (%s)", exc)
+            return
+
+        eng = self.pricing_engine
+        if not eng.pools:
+            logger.info("V3_AUTO_DISCOVER set but no V2 pools loaded; nothing to seed from")
+            return
+
+        seen_pairs: set[tuple[str, str]] = set()
+        discovered: list[Address] = []
+        for v2 in eng.pools.values():
+            t0 = v2.token0.address.checksum
+            t1 = v2.token1.address.checksum
+            key = tuple(sorted((t0.lower(), t1.lower())))
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            try:
+                tier_pools = pools_for_pair(eng.client.w3, t0, t1, factory_address=factory_override)
+            except Exception as exc:
+                logger.warning("V3 factory.getPool failed for %s/%s: %s", t0, t1, exc)
+                continue
+            for fee, pool_cs in tier_pools:
+                addr = Address.from_string(pool_cs)
+                if addr in eng.v3_pools:
+                    continue
+                discovered.append(addr)
+                logger.debug("V3 auto-discover: %s/%s fee=%d -> %s", t0, t1, fee, pool_cs)
+
+        if not discovered:
+            logger.info("V3 auto-discover found no pools for loaded V2 pairs")
+            return
+
+        try:
+            eng.load_pools_v3(discovered, quoter_address=quoter_override)
+            logger.info(
+                "Auto-discovered %d Uniswap V3 pool(s) across loaded V2 pairs", len(discovered)
+            )
+        except Exception as exc:
+            logger.warning("V3 auto-discover load failed (%s); continuing with V2 only", exc)
 
     # ------------------------------------------------------------------
     # Main loop
@@ -1049,17 +1274,23 @@ class ArbBot:
                     from config.config import PRODUCTION as _production
 
                     if _production:
-                        logger.warning(
-                            "PRODUCTION MODE — Binance production keys / endpoints; "
+                        logger.info(
+                            "Production spot mode (PRODUCTION=true): live CEX API; "
                             "verify pre-flight checklist.",
                         )
                     else:
-                        logger.info("Binance testnet mode (PRODUCTION=false in environment)")
+                        logger.info(
+                            "Testnet / sandbox mode (PRODUCTION=false): CEX uses testnet "
+                            "credentials when configured for the selected venue.",
+                        )
                 except Exception as exc:
                     logger.debug("Could not read production flag: %s", exc)
             if self._telegram.enabled:
                 self._telegram.send(_format_telegram_startup(self.config))
             await self._sync_balances()
+            if not self.config.demo and not isinstance(self.exchange, MockExchange):
+                # Fail fast if live USD marks cannot be built (wrong venue / missing pairs).
+                _ = self._capital_usd()
             self._session_portfolio_start_usd = self._session_portfolio_usd_mark()
             self._last_heartbeat_log_mono = time.monotonic()
 
@@ -1097,6 +1328,13 @@ class ArbBot:
                             hb_age,
                         )
                 except asyncio.CancelledError:
+                    break
+                except LiveUsdMarkError as exc:
+                    logger.critical(
+                        "Live inventory USD mark failed (CEX pricing) — stopping bot: %s",
+                        exc,
+                    )
+                    self.stop()
                     break
                 except Exception as exc:
                     logger.error("Tick error: %s", exc)
@@ -1159,12 +1397,28 @@ class ArbBot:
         self.running = False
         self.health.is_running = False
 
+    def _capital_usd(self) -> Decimal:
+        """Live mark when running against a real CEX; reference constants otherwise.
+
+        Demo / mock runs cannot price assets via order book, so we keep the
+        deterministic reference for those. Live runs read CEX prices via
+        ``ASSET/USDC`` then ``ASSET/USDT``. If live pricing fails,
+        :exc:`inventory.usd_mark.LiveUsdMarkError` propagates and the process should stop.
+        """
+        if self.config.demo or isinstance(self.exchange, MockExchange):
+            return estimate_inventory_usd(self.inventory)
+        return estimate_inventory_usd_live(self.inventory, self.exchange)
+
     def on_shutdown(self) -> None:
         """Best-effort Telegram summary when the process stops."""
         if self._telegram.enabled:
+            try:
+                cap: Optional[Decimal] = self._capital_usd()
+            except LiveUsdMarkError:
+                cap = None
             summary = generate_daily_summary(
                 self.pnl_engine,
-                current_capital=estimate_inventory_usd(self.inventory),
+                current_capital=cap,
             )
             self._telegram.send(html_escape_text(summary))
             self._telegram.send(_format_telegram_stopped_line())
@@ -1214,9 +1468,13 @@ class ArbBot:
 
         Cadence is controlled by ``ARB_POOL_REFRESH_SECONDS`` (default
         :data:`_DEFAULT_POOL_REFRESH_SECONDS`); set ``0`` to disable. Each
-        refresh issues one ``getReserves`` ``eth_call`` per loaded pool, which
-        is cheap relative to typical RPC budgets (one pool ≈ one call every
-        few seconds).
+        refresh issues one ``getReserves`` ``eth_call`` per loaded V2 pool,
+        which is cheap relative to typical RPC budgets (one pool ≈ one call
+        every few seconds).
+
+        V3 pools are intentionally **not** refreshed here — V3 quoting is
+        stateless via ``QuoterV2`` (each ``get_pair_prices_math`` call already
+        re-prices on-chain), so no in-memory state would change.
         """
         if self.pricing_engine is None:
             return
@@ -1266,7 +1524,7 @@ class ArbBot:
             return
 
         if not self.config.demo and _env_truthy(_ENV_AUTO_CAPITAL_EMERGENCY_STOP):
-            cap = estimate_inventory_usd(self.inventory)
+            cap = self._capital_usd()
             if cap < ABSOLUTE_MIN_CAPITAL:
                 self._shutdown_from_capital_emergency(cap)
                 return
@@ -1338,7 +1596,7 @@ class ArbBot:
                     continue
 
                 if not self.config.demo:
-                    cap = estimate_inventory_usd(self.inventory)
+                    cap = self._capital_usd()
                     ok_risk, reason_risk = self.risk_manager.check_pre_trade(
                         signal, total_capital=cap
                     )
@@ -1479,7 +1737,7 @@ class ArbBot:
                             self.stop()
                     if self.config.demo and isinstance(self.exchange, MockExchange):
                         self.exchange.apply_balance_deltas_from_execution(ctx)
-                    arb_record = execution_to_arb_record(ctx)
+                    arb_record = execution_to_arb_record(ctx, cex_venue=self._cex_venue)
                     self.pnl_engine.record(arb_record)
                     leg_pnl = arb_record.net_pnl
                     self._cumulative_arb_pnl += leg_pnl
@@ -1635,7 +1893,7 @@ class ArbBot:
 
         self.health.touch_heartbeat()
         self.health.circuit_breaker_open = self.executor.circuit_breaker.is_open()
-        self.health.current_capital = estimate_inventory_usd(self.inventory)
+        self.health.current_capital = self._capital_usd()
         self.health.daily_pnl = self.risk_manager.daily_realized_pnl
 
     # ------------------------------------------------------------------
@@ -1664,7 +1922,7 @@ class ArbBot:
         base, quote = parts[0], parts[1]
 
         for asset in (base, quote):
-            expected = self.inventory.get_available(Venue.BINANCE, asset)
+            expected = self.inventory.get_available(self._cex_venue, asset)
             actual = _cex_free_decimal(cex_raw, asset)
             diff = abs(expected - actual)
             if diff > tol:
@@ -1698,7 +1956,43 @@ class ArbBot:
 
         return "ok"
 
+    def _log_inventory_mtm_for_config_pairs(self) -> None:
+        """Console: per-pair MTM on wallet (DEX) vs CEX using tracker totals + CEX order-book"""
+        for pair in self.config.pairs:
+            try:
+                d = snapshot_pair_mtm_usd(
+                    self.inventory,
+                    self.exchange,
+                    cex_venue=self._cex_venue,
+                    pair=pair,
+                )
+            except LiveUsdMarkError as exc:
+                logger.warning("inventory_mtm %s unavailable: %s", pair, exc)
+                continue
+            b, q = str(d["base"]), str(d["quote"])
+            logger.info(
+                "inventory_mtm %s | DEX — %s %s USD | %s %s USD (total %s USD) | "
+                "CEX — %s %s USD | %s %s USD (total %s USD) | "
+                "sizing/risk use InventoryTracker only",
+                pair,
+                b,
+                _format_dec(d["dex_base_usd"], 2),
+                q,
+                _format_dec(d["dex_quote_usd"], 2),
+                _format_dec(d["dex_total_usd"], 2),
+                b,
+                _format_dec(d["cex_base_usd"], 2),
+                q,
+                _format_dec(d["cex_quote_usd"], 2),
+                _format_dec(d["cex_total_usd"], 2),
+            )
+
     async def _sync_balances(self) -> None:
+        """Pull CEX + on-chain balances into :attr:`inventory` only.
+
+        Strategy and risk use :class:`InventoryTracker` (``get_available`` and
+        snapshots) — not ad-hoc ``fetch_balance`` during signal generation.
+        """
         cex_balances: Any = None
         cex_fetch_failed = False
         try:
@@ -1737,7 +2031,7 @@ class ArbBot:
 
         if cex_balances is not None:
             try:
-                self.inventory.update_from_cex(Venue.BINANCE, cex_balances)
+                self.inventory.update_from_cex(self._cex_venue, cex_balances)
             except Exception as exc:
                 logger.warning("inventory.update_from_cex failed: %s", exc)
 
@@ -1745,14 +2039,20 @@ class ArbBot:
         if wallet_balances:
             self.inventory.update_from_wallet(Venue.WALLET, wallet_balances)
 
+        if not self.config.demo and not isinstance(self.exchange, MockExchange):
+            self._log_inventory_mtm_for_config_pairs()
+
     def _fetch_wallet_balances(self) -> dict[str, Decimal]:
         """Return on-chain balances; in demo / no-chain mode we synthesize them.
 
         For live runs we read native ETH **and** the ERC20 ``balanceOf(wallet)``
-        for every token referenced by a loaded pool on
-        :attr:`pricing_engine`. Token symbols are normalized via
-        :data:`_WALLET_SYMBOL_ALIASES` so that wrapped tokens line up with the
-        CEX-style ticker the inventory tracker stores (e.g. ``WETH`` → ``ETH``).
+        for every token referenced by loaded **V2 and V3** pools on
+        :attr:`pricing_engine`, plus the base/quote mints resolved for each
+        configured CEX pair (so wallet inventory matches what you actually trade,
+        even when a pool env lists only part of the route). Token symbols are
+        normalized via :data:`_WALLET_SYMBOL_ALIASES` so that wrapped tokens line
+        up with the CEX-style ticker the inventory tracker stores (e.g. ``WETH``
+        → ``ETH``).
 
         When the bot runs with ``--dry-run`` and ``ARB_VIRTUAL_BALANCES`` is set
         (e.g. ``ETH=2,USDC=5000``) the parsed values **override** the on-chain
@@ -1788,13 +2088,33 @@ class ArbBot:
                     pool_tokens: list[Any] = []
                     if self.pricing_engine is not None:
                         seen: set[str] = set()
+
+                        def _append_wallet_token(tok: Any) -> None:
+                            k = tok.address.lower
+                            if k in seen:
+                                return
+                            seen.add(k)
+                            pool_tokens.append(tok)
+
                         for pool in self.pricing_engine.pools.values():
                             for tok in (pool.token0, pool.token1):
-                                key = tok.address.lower
-                                if key in seen:
-                                    continue
-                                seen.add(key)
-                                pool_tokens.append(tok)
+                                _append_wallet_token(tok)
+                        for pool in self.pricing_engine.v3_pools.values():
+                            for tok in (pool.token0, pool.token1):
+                                _append_wallet_token(tok)
+                        tr = self._token_resolver
+                        if tr is not None:
+                            for pair in self.config.pairs:
+                                try:
+                                    bt, qt = tr(pair)
+                                    _append_wallet_token(bt)
+                                    _append_wallet_token(qt)
+                                except Exception as exc:
+                                    logger.debug(
+                                        "wallet ERC20 list: could not resolve %s (%s)",
+                                        pair,
+                                        exc,
+                                    )
 
                     for tok in pool_tokens:
                         try:
@@ -1844,7 +2164,9 @@ class ArbBot:
 # --- Record bridge -----------------------------------------------------------
 
 
-def execution_to_arb_record(ctx: ExecutionContext) -> ArbRecord:
+def execution_to_arb_record(
+    ctx: ExecutionContext, *, cex_venue: Venue = Venue.BINANCE
+) -> ArbRecord:
     """Convert an :class:`ExecutionContext` to an :class:`ArbRecord` for PnL.
 
     Assignment of buy/sell leg is driven by ``signal.direction`` so the record
@@ -1870,7 +2192,7 @@ def execution_to_arb_record(ctx: ExecutionContext) -> ArbRecord:
     cex_leg = TradeLeg(
         id=f"{signal.signal_id}_cex",
         timestamp=started if ctx.leg1_venue == VENUE_CEX else finished,
-        venue=Venue.BINANCE,
+        venue=cex_venue,
         symbol=signal.pair,
         side="buy" if signal.direction == Direction.BUY_CEX_SELL_DEX else "sell",
         amount=cex_size,

@@ -56,7 +56,8 @@ def _snapshot() -> dict[str, Any]:
         "cex_spread_bps": Decimal("1.88"),
         "dex_buy": Decimal("3450.10"),
         "dex_sell": Decimal("3460.40"),
-        "dex_source": "engine",
+        "dex_spot": Decimal("3455.25"),
+        "dex_source": "engine_math",
         "size_probe_base": Decimal("0.01"),
         "fetched_at": time.time(),
     }
@@ -76,7 +77,8 @@ def test_parse_virtual_balances_normalises_aliases() -> None:
     }
 
 
-def test_console_line_no_signal_uses_best_dex_quote() -> None:
+def test_console_line_no_signal_shows_dex_spot_vs_cex_mid_spread() -> None:
+    """No signal: DEX column is reserve spot; spread is spot vs CEX mid (bps)."""
     line = format_dryrun_console_line(
         pair="ETH/USDC",
         snapshot=_snapshot(),
@@ -86,21 +88,49 @@ def test_console_line_no_signal_uses_best_dex_quote() -> None:
     assert "ETH/USDC" in line
     assert "bid 3450.20 x 1.4200 ETH" in line
     assert "ask 3450.85 x 0.9100 ETH" in line
-    assert "dex 3460.40" in line  # picks the side further from mid
+    assert "dex 3455.25 (spot)" in line
+    assert "spread 14 bps" in line
+    assert "est_profit $0.00" in line
     assert "sent=NO reason=no_opportunity" in line
 
 
-def test_console_line_with_signal_uses_directional_dex_price() -> None:
+def test_console_line_no_signal_shows_overridden_dex_spot() -> None:
+    snap = _snapshot()
+    snap["dex_spot"] = Decimal("9999")
+    line = format_dryrun_console_line(
+        pair="ETH/USDC",
+        snapshot=snap,
+        signal=None,
+        sent="NO",
+    )
+    assert "dex 9999.00 (spot)" in line
+
+
+def test_console_line_no_signal_shows_negative_hypothetical_profit() -> None:
+    snap = _snapshot()
+    snap["hypothetical_net_pnl_usd"] = Decimal("-2.50")
+    snap["hypothetical_size_base"] = Decimal("0.01")
+    snap["hypothetical_sell_symbol"] = "ETH"
+    snap["hypothetical_sell_venue"] = "DEX"
+    line = format_dryrun_console_line(
+        pair="ETH/USDC",
+        snapshot=snap,
+        signal=None,
+        sent="NO reason=below_min_profit",
+    )
+    assert "est_profit -$2.50 (sell 0.010000 ETH on DEX)" in line
+
+
+def test_console_line_with_signal_still_shows_dex_spot_when_available() -> None:
     line = format_dryrun_console_line(
         pair="ETH/USDC",
         snapshot=_snapshot(),
         signal=_signal(),
         sent="NO (DRY-RUN signed_tx=0xDRYRUNabc)",
     )
-    # BUY_CEX_SELL_DEX -> uses dex_sell as the relevant DEX price.
-    assert "dex 3460.40" in line
-    assert "spread 30.00 bps" in line
-    assert "est_profit $1.84" in line
+    assert "dex 3455.25 (spot)" in line
+    assert "spread 30 bps" in line
+    assert "est_profit $1.84 (sell 0.050000 ETH on DEX)" in line
     assert "sent=NO (DRY-RUN signed_tx=0xDRYRUNabc)" in line
 
 
@@ -111,6 +141,7 @@ def test_console_line_handles_missing_snapshot() -> None:
     assert "bid N/A" in line
     assert "ask N/A" in line
     assert "dex N/A" in line
+    assert "est_profit $0.00" in line
 
 
 def test_dryrun_signed_telegram_contains_signed_marker() -> None:

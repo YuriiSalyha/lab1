@@ -81,7 +81,7 @@ def test_safety_hourly_trade_count_one_below_limit_ok() -> None:
 def test_absolute_constants_match_course_hard_caps() -> None:
     assert ABSOLUTE_MAX_TRADE_USD == Decimal("25")
     assert ABSOLUTE_MAX_DAILY_LOSS == Decimal("20")
-    assert ABSOLUTE_MIN_CAPITAL == Decimal("50")
+    assert ABSOLUTE_MIN_CAPITAL == Decimal("65")
 
 
 def test_safety_capital_exactly_at_minimum_ok() -> None:

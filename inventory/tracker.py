@@ -5,12 +5,13 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
-DEFAULT_REBALANCE_DEVIATION_THRESHOLD_PCT = 30.0
+DEFAULT_REBALANCE_DEVIATION_THRESHOLD_PCT = Decimal("30")
 
 
 class Venue(str, Enum):
     BINANCE = "binance"
     BYBIT = "bybit"
+    OKX = "okx"
     WALLET = "wallet"  # On-chain wallet (DEX venue)
 
 
@@ -213,13 +214,15 @@ class InventoryTracker:
         fee_b = self._ensure_balance(venue, fee_asset)
         fee_b.free -= fee_d
 
-    def _target_fraction(self, venue: Venue) -> float:
+    def _target_fraction(self, venue: Venue) -> Decimal:
         n = len(self._venues)
         if n == 0:
-            return 0.0
-        return 1.0 / n
+            return Decimal("0")
+        return Decimal("1") / Decimal(n)
 
-    def skew(self, asset: str, rebalance_threshold_pct: float | None = None) -> dict:
+    def skew(
+        self, asset: str, rebalance_threshold_pct: Decimal | float | str | int | None = None
+    ) -> dict:
         """
         Calculate distribution skew for an asset across venues.
         ``pct`` is 0–100. ``deviation_pct`` is relative vs equal-split target for that venue count.
@@ -231,27 +234,27 @@ class InventoryTracker:
                 amounts[v] = b.total
         total = sum(amounts.values(), Decimal("0"))
         threshold = (
-            rebalance_threshold_pct
+            _to_decimal(rebalance_threshold_pct)
             if rebalance_threshold_pct is not None
             else DEFAULT_REBALANCE_DEVIATION_THRESHOLD_PCT
         )
 
         venues_out: dict[str, dict] = {}
-        max_dev = 0.0
-        target_frac = self._target_fraction(self._venues[0]) if self._venues else 0.5
+        max_dev = Decimal("0")
+        target_frac = self._target_fraction(self._venues[0]) if self._venues else Decimal("0.5")
 
         for v in self._venues:
             amt = amounts[v]
             if total > 0:
-                pct = float(amt / total * 100)
-                actual_frac = float(amt / total)
+                pct = amt / total * Decimal("100")
+                actual_frac = amt / total
             else:
-                pct = 0.0
-                actual_frac = 0.0
+                pct = Decimal("0")
+                actual_frac = Decimal("0")
             if target_frac > 0:
-                deviation_pct = abs(actual_frac - target_frac) / target_frac * 100.0
+                deviation_pct = abs(actual_frac - target_frac) / target_frac * Decimal("100")
             else:
-                deviation_pct = 0.0
+                deviation_pct = Decimal("0")
             max_dev = max(max_dev, deviation_pct)
             venues_out[v.value] = {
                 "amount": amt,
@@ -267,7 +270,9 @@ class InventoryTracker:
             "needs_rebalance": max_dev > threshold,
         }
 
-    def get_skews(self, rebalance_threshold_pct: float | None = None) -> list[dict]:
+    def get_skews(
+        self, rebalance_threshold_pct: Decimal | float | str | int | None = None
+    ) -> list[dict]:
         """
         Check skew for ALL tracked assets.
         """

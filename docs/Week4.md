@@ -30,11 +30,11 @@ Together they replace the read-only **`ArbChecker`** path with **validated, size
 
 ### `strategy.generator` — `SignalGenerator`
 
-- **Purpose** — Turn live **CEX** + **DEX** (or stub) prices into a single **`Signal`** per pair, or **`None`** with diagnosable reasons.
+- **Purpose** — Turn live **CEX** + **DEX** (on-chain V2 math: execution + reserve spot) into a single **`Signal`** per pair, or **`None`** with diagnosable reasons.
 - **Config knobs** — Min spread bps, min profit USD, max position USD, **signal TTL**, **cooldown** per pair, optional **`max_trade_base`** cap.
 - **Sizing** — Default path **`generate(pair, size=None)`** searches for a **feasible base size** (inventory + caps); with **size-dependent** `PricingEngine` quotes it uses a **short grid** over candidate sizes to maximize **`FeeStructure.net_profit_usd`** (see **`OPTIMAL_SIZE_GRID_SAMPLES`**).
-- **DEX quotes** — Optional **`token_resolver`** maps **`"BASE/QUOTE"`** to on-chain **`Token`** pair for real engine math; otherwise **stub** DEX prices vs CEX mid (documented premiums in code).
-- **Operator visibility** — **`last_snapshot`**, **`last_reason`** (e.g. `no_edge`, `inventory_blocked`, `in_cooldown`), **`last_dex_price_source`** (`engine_math` vs `stub`) for console / logging.
+- **DEX quotes** — **`token_resolver`** plus **`PricingEngine.get_pair_prices_math`** supply **`dex_buy`**, **`dex_sell`**, and **`dex_spot`** (reserve ratio). Missing wiring raises **`DexQuotesUnavailableError`** (no CEX-mid stub).
+- **Operator visibility** — **`last_snapshot`**, **`last_reason`** (e.g. `no_edge`, `inventory_blocked`, `in_cooldown`), **`last_dex_price_source`** (`engine_math`) for console / logging.
 
 ### `strategy.dex_token_resolver`
 
@@ -108,6 +108,28 @@ Together they replace the read-only **`ArbChecker`** path with **validated, size
 
 - **`scripts/arb_bot.py`** wires **`SignalGenerator`**, **`SignalScorer`** (where used), **`Executor`**, inventory, pricing, and exchange clients; env flags control **dry-run**, **signed DEX dry-run**, and live trading.
 - **Tests** (representative): `tests/test_strategy.py` (generator, fees, scorer), `tests/test_engine.py` (executor + circuit/replay), `tests/test_live_dex_leg_unit.py`, `tests/test_dry_run_signed.py`, `tests/test_webhook_alerts.py`, `tests/test_arb_bot_dry_run.py`, `tests/test_recovery.py`.
+
+---
+
+## Uniswap V3 pools (optional, additive)
+
+V3 support sits behind the same `LiquidityPoolQuote` protocol that V2 already implements, so V2-only deployments stay byte-for-byte unchanged when no V3 pools are configured.
+
+**Activation** (either is enough; V3 is off by default):
+
+- `V3_POOLS=0xPoolFee500,0xPoolFee3000` (also accepts `V3_POOL` / `ARB_V3_POOLS`) — explicit list of pool addresses.
+- `V3_AUTO_DISCOVER=1` — for every loaded V2 pool's `(token0, token1)` pair, call `factory.getPool` for fee tiers `500 / 3000 / 10_000` and register every non-zero match.
+
+**Selection rule** (`PricingEngine.get_pair_prices_math_with_pool`):
+
+1. If a V2 pool matches the pair, V2 wins **unless** a V3 fee tier yields a strictly better `dex_sell` at `base_size` (independently for `dex_buy`).
+2. V3 candidates that revert or return zero (no liquidity at this size) silently skip — a working V2 pool always wins over a broken V3 quote.
+
+**Plumbing into the executor** (`executor/live_dex_leg.py`): the generator stamps `dex_kind`, `pool_address`, `fee_tier` into `Signal.metadata`. When `dex_kind == "v3"` the executor builds calldata via `chain.uniswap_v3_router.encode_exact_input_single_calldata` / `encode_exact_output_single_calldata` against `UNISWAP_V3_ROUTER` (SwapRouter02). When unset (or `dex_kind == "v2"`), the legacy V2 router path runs unchanged.
+
+**Refresh model** — V3 quoting is stateless via `QuoterV2` (`eth_call`). `_maybe_refresh_pool_reserves` keeps refreshing only V2 reserves on its `ARB_POOL_REFRESH_SECONDS` cadence; V3 is re-priced on every `get_pair_prices_math` call.
+
+**Live ticks** — `pricing/v3_pool_price_feed.py` mirrors the V2 `Sync`-based feed: subscribes to one pool's V3 `Swap` logs and converts `sqrtPriceX96` to a human-units spot. Used for monitoring / dashboards; not on the critical signal path.
 
 ---
 
