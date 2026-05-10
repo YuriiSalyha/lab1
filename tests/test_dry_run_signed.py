@@ -71,9 +71,10 @@ def _snapshot() -> dict[str, Any]:
 def test_parse_virtual_balances_normalises_aliases() -> None:
     parsed = _parse_virtual_balances("ETH=2,USDC=5000,WETH=3,WBTC=0.1,bogus,empty=,negative=-1")
     assert parsed == {
-        "ETH": Decimal("3"),  # WETH alias overrides ETH because dict insertion order
+        "ETH": Decimal("2"),
         "USDC": Decimal("5000"),
-        "BTC": Decimal("0.1"),
+        "WETH": Decimal("3"),
+        "WBTC": Decimal("0.1"),
     }
 
 

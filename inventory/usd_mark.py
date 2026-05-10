@@ -143,6 +143,12 @@ def _symbols_for_pair_leg(logical: str) -> tuple[str, ...]:
     return (u,)
 
 
+def wallet_rollup_qty(balances: dict[str, Any], logical: str) -> Decimal:
+    """Sum wallet dict amounts for every symbol that maps to a CEX-style leg (e.g. ETH+WETH)."""
+    by_upper = {str(k).upper(): Decimal(str(v)) for k, v in balances.items()}
+    return sum(by_upper.get(s, Decimal("0")) for s in _symbols_for_pair_leg(logical.strip()))
+
+
 def _venue_leg_qty(venues: dict[str, Any], venue_key: str, leg_symbols: tuple[str, ...]) -> Decimal:
     assets = venues.get(venue_key) or {}
     want = {s.upper() for s in leg_symbols}

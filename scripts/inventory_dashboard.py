@@ -21,6 +21,7 @@ from config.config import BINANCE_CONFIG, BYBIT_CONFIG  # noqa: E402
 from core.types import Address  # noqa: E402
 from core.wallet import WalletManager  # noqa: E402
 from exchange.client import ExchangeClient  # noqa: E402
+from inventory.fee_tokens import parse_fee_tokens_from_env  # noqa: E402
 from inventory.tracker import InventoryTracker, Venue  # noqa: E402
 
 # --- Configuration (no magic numbers in body) ---
@@ -56,7 +57,7 @@ def _build_tracker(
         venues.append(Venue.WALLET)
     if not venues:
         raise SystemExit("Enable at least one venue (see --help).")
-    return InventoryTracker(venues)
+    return InventoryTracker(venues, fee_token_assets=parse_fee_tokens_from_env())
 
 
 def _poll_balances(tracker: InventoryTracker, rpc: str | None = None) -> list[str]:

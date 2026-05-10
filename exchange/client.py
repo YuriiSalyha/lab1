@@ -289,6 +289,27 @@ class ExchangeClient:
             "timestamp": int(ts) if ts is not None else 0,
         }
 
+    def _ioc_refresh_raw_order(self, symbol: str, raw: dict) -> dict:
+        """CCXT sometimes returns status=None right after create_order;
+        resolve via fetch_order."""
+        if not isinstance(raw, dict):
+            return raw
+        st = raw.get("status")
+        if st in ("filled", "closed", "canceled", "cancelled", "rejected", "expired"):
+            return raw
+        oid = raw.get("id")
+        if oid is None or oid == "":
+            return raw
+        try:
+            return self._ccxt_request(
+                "fetch_order",
+                4,
+                lambda: self.client.fetch_order(str(oid), symbol),
+            )
+        except Exception as exc:
+            logger.warning("IOC follow-up fetch_order(%s) failed: %s", oid, exc)
+            return raw
+
     def fetch_order_book(
         self,
         symbol: str,
@@ -431,6 +452,7 @@ class ExchangeClient:
                 {"timeInForce": "IOC"},
             ),
         )
+        raw = self._ioc_refresh_raw_order(symbol, raw)
         return self._normalize_order(raw)
 
     def create_market_order(

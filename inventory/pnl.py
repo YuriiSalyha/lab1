@@ -50,6 +50,9 @@ class ArbRecord:
     sell_leg: TradeLeg
     gas_cost_usd: Decimal = Decimal("0")
     dex_tx_hash: str | None = None
+    #: Modeled CEX+DEX+flat gas USD from :class:`~strategy.fees.FeeStructure`
+    #: (matches executor ``total_fee_usd``) when leg-level fees are unknown.
+    executor_fee_bundle_usd: Decimal = Decimal("0")
 
     @property
     def transaction_hash(self) -> str | None:
@@ -71,10 +74,10 @@ class ArbRecord:
 
     @property
     def total_fees(self) -> Decimal:
-        """All fees: both legs (USD) + gas (USD)."""
+        """Leg fees (USD) + optional receipt gas + executor modeled fee bundle."""
         b = _fee_to_usd(self.buy_leg.fee, self.buy_leg.fee_asset)
         s = _fee_to_usd(self.sell_leg.fee, self.sell_leg.fee_asset)
-        return b + s + self.gas_cost_usd
+        return b + s + self.gas_cost_usd + self.executor_fee_bundle_usd
 
     @property
     def net_pnl(self) -> Decimal:

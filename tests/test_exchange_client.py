@@ -149,6 +149,49 @@ def test_limit_ioc_returns_fill_info(client, mock_ccxt_binance):
     assert out["time_in_force"] == "IOC"
 
 
+def test_limit_ioc_fetch_order_when_status_missing(client, mock_ccxt_binance):
+    """OKX-style create response can omit ``status``; client resolves via ``fetch_order``."""
+    mock_ccxt_binance.create_order.return_value = {
+        "id": "oid-pending",
+        "symbol": "ETH/USDT",
+        "type": "limit",
+        "side": "buy",
+        "amount": 0.1,
+        "filled": 0,
+        "average": None,
+        "status": None,
+        "timestamp": 999,
+        "timeInForce": "IOC",
+    }
+    mock_ccxt_binance.fetch_order.return_value = {
+        "id": "oid-pending",
+        "symbol": "ETH/USDT",
+        "filled": 0.1,
+        "average": 2500.0,
+        "status": "closed",
+        "amount": 0.1,
+        "timestamp": 1000,
+        "timeInForce": "IOC",
+    }
+    out = client.create_limit_ioc_order("ETH/USDT", "buy", 0.1, 2500.0)
+    mock_ccxt_binance.fetch_order.assert_called_once()
+    assert out["status"] == "closed"
+    assert out["amount_filled"] == Decimal("0.1")
+
+
+def test_limit_ioc_no_extra_fetch_when_terminal(client, mock_ccxt_binance):
+    mock_ccxt_binance.create_order.return_value = {
+        "id": "oid1",
+        "symbol": "ETH/USDT",
+        "filled": 0,
+        "average": None,
+        "status": "canceled",
+        "amount": 0.1,
+    }
+    client.create_limit_ioc_order("ETH/USDT", "buy", 0.1, 2500.0)
+    mock_ccxt_binance.fetch_order.assert_not_called()
+
+
 def test_rate_limiter_blocks_when_exhausted():
     """Requests blocked when weight limit reached."""
     lim = WeightRateLimiter(max_weight=2, window_sec=60.0)

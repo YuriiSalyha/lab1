@@ -17,6 +17,7 @@ import pytest
 
 from executor.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from executor.engine import (
+    CEX_SLIPPAGE_PAD,
     VENUE_CEX,
     VENUE_DEX,
     Executor,
@@ -331,6 +332,49 @@ def test_executor_config_rejects_bad_input():
         ExecutorConfig(dex_deadline_seconds=0)
     with pytest.raises(ValueError):
         ExecutorConfig(dex_slippage_bps=Decimal("10001"))
+
+
+def test_cex_ioc_limit_price_padded_buy_aggressive_sell_aggressive():
+    captured: dict[str, Any] = {}
+
+    class _Ex:
+        def create_limit_ioc_order(
+            self, symbol: str, side: str, amount: float, price: float
+        ) -> dict:
+            captured["symbol"] = symbol
+            captured["side"] = side
+            captured["amount"] = amount
+            captured["price"] = price
+            return {
+                "status": "filled",
+                "amount_filled": amount,
+                "avg_fill_price": price,
+            }
+
+    async def run():
+        ex = Executor(
+            _Ex(),
+            None,
+            None,
+            ExecutorConfig(simulation_mode=False),
+            fees=FeeStructure(),
+        )
+        q = Decimal("2333.50")
+        sz = Decimal("0.05")
+
+        sig_buy = _make_signal(direction=Direction.BUY_CEX_SELL_DEX, cex_price=q)
+        out_buy = await ex._execute_cex_leg(sig_buy, sz)
+        assert out_buy["success"] is True
+        assert captured["side"] == "buy"
+        assert captured["price"] == pytest.approx(float(q * CEX_SLIPPAGE_PAD))
+
+        sig_sell = _make_signal(direction=Direction.BUY_DEX_SELL_CEX, cex_price=q)
+        out_sell = await ex._execute_cex_leg(sig_sell, sz)
+        assert out_sell["success"] is True
+        assert captured["side"] == "sell"
+        assert captured["price"] == pytest.approx(float(q / CEX_SLIPPAGE_PAD))
+
+    _run(run())
 
 
 def test_live_dex_leg_returns_error_when_not_configured():

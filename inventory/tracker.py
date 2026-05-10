@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from typing import Sequence
+
+from inventory.fee_tokens import normalize_fee_token_list
 
 DEFAULT_REBALANCE_DEVIATION_THRESHOLD_PCT = Decimal("30")
 
@@ -39,14 +42,58 @@ class InventoryTracker:
     Single source of truth for where your money is.
     """
 
-    def __init__(self, venues: list[Venue]):
-        """Initialize tracker for given venues."""
+    def __init__(
+        self,
+        venues: list[Venue],
+        *,
+        fee_token_assets: Sequence[str] | tuple[str, ...] | None = None,
+    ):
+        """Initialize tracker for given venues.
+
+        ``fee_token_assets`` lists symbols used for gas / chain fees (e.g. ``ETH``).
+        When non-empty, :meth:`snapshot` adds a ``fee_tokens`` breakdown. Pass
+        ``()`` or omit for legacy behavior (no extra snapshot keys).
+        """
         self._venues = list(venues)
         self._balances: dict[Venue, dict[str, Balance]] = {v: {} for v in self._venues}
+        self._fee_token_assets: tuple[str, ...] = normalize_fee_token_list(
+            list(fee_token_assets) if fee_token_assets is not None else []
+        )
 
     @property
     def venues(self) -> list[Venue]:
         return list(self._venues)
+
+    @property
+    def fee_token_assets(self) -> tuple[str, ...]:
+        return self._fee_token_assets
+
+    def _fee_tokens_breakdown(self) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        z = Decimal("0")
+        for symbol in self._fee_token_assets:
+            by_venue: dict[str, dict] = {}
+            total_free = z
+            total_locked = z
+            total = z
+            for v in self._venues:
+                b = self._balances.get(v, {}).get(symbol)
+                if b is not None:
+                    free, locked, tot = b.free, b.locked, b.total
+                else:
+                    free = locked = tot = z
+                by_venue[v.value] = {"free": free, "locked": locked, "total": tot}
+                total_free += free
+                total_locked += locked
+                total += tot
+            out[symbol] = {
+                "configured_symbol": symbol,
+                "by_venue": by_venue,
+                "total_free": total_free,
+                "total_locked": total_locked,
+                "total": total,
+            }
+        return out
 
     def update_from_cex(self, venue: Venue, balances: dict):
         """
@@ -125,13 +172,34 @@ class InventoryTracker:
                 if px is not None:
                     total_usd += qty * px
             out["total_usd"] = total_usd
+        if self._fee_token_assets:
+            out["fee_tokens"] = self._fee_tokens_breakdown()
         return out
 
     def get_available(self, venue: Venue, asset: str) -> Decimal:
         """
         How much of `asset` is available to trade at `venue`.
         Returns free balance only (not locked in orders).
+
+        On :attr:`Venue.WALLET`, ``ETH`` / ``BTC`` sum wrapped/native synonyms
+        (``WETH`` / ``WBETH`` / ``WBTC``) so sizing matches on-chain trading while
+        native gas ETH stays on the ``ETH`` balance row separately from ``WETH``.
         """
+        if venue == Venue.WALLET:
+            a = asset.upper()
+            if a == "ETH":
+                keys = ("ETH", "WETH", "WBETH")
+            elif a == "BTC":
+                keys = ("BTC", "WBTC")
+            else:
+                keys = ()
+            if keys:
+                total = Decimal("0")
+                for sym in keys:
+                    b = self._balances.get(venue, {}).get(sym)
+                    if b:
+                        total += b.free
+                return total
         b = self._balances.get(venue, {}).get(asset)
         return b.free if b else Decimal("0")
 

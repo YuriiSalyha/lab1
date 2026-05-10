@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from inventory.fee_tokens import normalize_fee_token_list, parse_fee_tokens_from_env
 from inventory.pnl import ArbRecord, PnLEngine, TradeLeg
 from inventory.rebalancer import MIN_OPERATING_BALANCE, TRANSFER_FEES, RebalancePlanner
 from inventory.tracker import InventoryTracker, Venue
@@ -37,6 +38,84 @@ def test_snapshot_aggregates_across_venues(tracker):
     tracker.update_from_wallet(Venue.WALLET, {"ETH": Decimal("7.5")})
     snap = tracker.snapshot()
     assert snap["totals"]["ETH"] == Decimal("20")
+
+
+def test_wallet_get_available_eth_sums_native_and_wrapped(tracker):
+    tracker.update_from_wallet(
+        Venue.WALLET,
+        {"ETH": Decimal("0.000619"), "WETH": Decimal("0.010811")},
+    )
+    assert tracker.get_available(Venue.WALLET, "ETH") == Decimal("0.011430")
+    assert tracker.get_available(Venue.WALLET, "WETH") == Decimal("0.010811")
+
+
+def test_wallet_rollup_qty_eth():
+    from inventory.usd_mark import wallet_rollup_qty
+
+    d = {"ETH": Decimal("1"), "WETH": Decimal("2")}
+    assert wallet_rollup_qty(d, "ETH") == Decimal("3")
+
+
+def test_fee_tokens_wallet_eth_is_native_only_not_weth():
+    """Gas token row tracks native ``ETH`` balance row, not wrapped ``WETH``."""
+    t = InventoryTracker([Venue.WALLET], fee_token_assets=("ETH",))
+    t.update_from_wallet(
+        Venue.WALLET,
+        {"ETH": Decimal("0.000619"), "WETH": Decimal("0.010811")},
+    )
+    ft = t.snapshot()["fee_tokens"]["ETH"]
+    assert ft["by_venue"]["wallet"]["total"] == Decimal("0.000619")
+
+
+def test_snapshot_has_no_fee_tokens_key_by_default(tracker):
+    tracker.update_from_cex(Venue.BINANCE, _cex_bal("ETH", "1"))
+    snap = tracker.snapshot()
+    assert "fee_tokens" not in snap
+
+
+def test_snapshot_fee_tokens_breakdown_across_venues():
+    t = InventoryTracker(
+        [Venue.BINANCE, Venue.WALLET],
+        fee_token_assets=("ETH",),
+    )
+    t.update_from_cex(Venue.BINANCE, _cex_bal("ETH", "12.5"))
+    t.update_from_wallet(Venue.WALLET, {"ETH": Decimal("7.5")})
+    snap = t.snapshot()
+    assert "fee_tokens" in snap
+    ft = snap["fee_tokens"]["ETH"]
+    assert ft["configured_symbol"] == "ETH"
+    assert ft["total"] == Decimal("20")
+    assert ft["total_free"] == Decimal("20")
+    assert ft["total_locked"] == Decimal("0")
+    assert ft["by_venue"]["binance"]["total"] == Decimal("12.5")
+    assert ft["by_venue"]["wallet"]["total"] == Decimal("7.5")
+
+
+def test_fee_token_assets_property_and_dedupe():
+    t = InventoryTracker([Venue.WALLET], fee_token_assets=["eth", " ETH ", "BTC"])
+    assert t.fee_token_assets == ("ETH", "BTC")
+
+
+def test_normalize_fee_token_list_empty():
+    assert normalize_fee_token_list([]) == ()
+    assert normalize_fee_token_list(None) == ()
+
+
+def test_parse_fee_tokens_from_env(monkeypatch):
+    monkeypatch.delenv("ARB_INVENTORY_FEE_TOKENS", raising=False)
+    assert parse_fee_tokens_from_env() == ()
+    monkeypatch.setenv("ARB_INVENTORY_FEE_TOKENS", " eth , ETH ,matic ")
+    assert parse_fee_tokens_from_env() == ("ETH", "MATIC")
+
+
+def test_snapshot_fee_tokens_zeros_when_asset_missing():
+    t = InventoryTracker([Venue.BINANCE, Venue.WALLET], fee_token_assets=("ETH",))
+    t.update_from_wallet(Venue.WALLET, {"USDT": Decimal("100")})
+    snap = t.snapshot()
+    ft = snap["fee_tokens"]["ETH"]
+    assert ft["by_venue"]["binance"]["total"] == Decimal("0")
+    assert ft["by_venue"]["wallet"]["total"] == Decimal("0")
+    assert ft["total"] == Decimal("0")
 
 
 def test_can_execute_passes_when_sufficient(tracker):
@@ -309,6 +388,21 @@ def test_pnl_mixed_eth_and_usdt_fee_assets():
     assert r.total_fees == Decimal("2") + Decimal("3") + Decimal("1")
 
 
+def test_executor_fee_bundle_usd_in_total_fees_when_legs_have_no_fee():
+    buy = _leg("b", Venue.BINANCE, "buy", "1", "2000", "0", "USDT")
+    sell = _leg("s", Venue.WALLET, "sell", "1", "2100", "0", "USDT")
+    bundle = Decimal("0.012556")
+    r = ArbRecord(
+        id="bundle1",
+        timestamp=buy.timestamp,
+        buy_leg=buy,
+        sell_leg=sell,
+        executor_fee_bundle_usd=bundle,
+    )
+    assert r.total_fees == bundle
+    assert r.net_pnl == r.gross_pnl - bundle
+
+
 def test_pnl_bps_calculation():
     """PnL bps = net_pnl / notional * 10000."""
     buy = _leg("b", Venue.BINANCE, "buy", "2", "1000", "0", "USDT")
@@ -400,3 +494,48 @@ def test_recent_includes_transaction_hash():
     )
     eng.record(r_empty)
     assert eng.recent(1)[0]["transaction_hash"] == ""
+
+
+def test_build_trade_metrics_fees_paid_from_executor_bundle():
+    """TRADE log fees_paid mirrors ArbRecord.total_fees including modeled bundle."""
+    import time
+
+    from executor.engine import ExecutionContext, ExecutorState
+    from monitoring.health_state import build_trade_metrics
+    from strategy.signal import Direction, Signal
+
+    t0 = time.time()
+    sig = Signal.create(
+        "ETH/USDT",
+        Direction.BUY_CEX_SELL_DEX,
+        timestamp=t0,
+        cex_price=Decimal("2000"),
+        dex_price=Decimal("2100"),
+        spread_bps=Decimal("100"),
+        size=Decimal("1"),
+        expected_gross_pnl=Decimal("100"),
+        expected_fees=Decimal("10"),
+        expected_net_pnl=Decimal("90"),
+        score=Decimal("50"),
+        expiry=t0 + 60,
+        inventory_ok=True,
+        within_limits=True,
+    )
+    buy = _leg("b", Venue.BINANCE, "buy", "1", "2000", "0", "USDT")
+    sell = _leg("s", Venue.WALLET, "sell", "1", "1990", "0", "USDT")
+    bundle = Decimal("0.05")
+    rec = ArbRecord(
+        id="x",
+        timestamp=buy.timestamp,
+        buy_leg=buy,
+        sell_leg=sell,
+        executor_fee_bundle_usd=bundle,
+    )
+    assert rec.gross_pnl == Decimal("-10")
+    ctx = ExecutionContext(signal=sig, state=ExecutorState.DONE)
+    ctx.started_at = t0
+    ctx.finished_at = t0 + 1.0
+    ctx.actual_net_pnl = Decimal("-10.05")
+    tm = build_trade_metrics(sig, ctx, rec)
+    assert tm.fees_paid == bundle
+    assert tm.net_pnl == ctx.actual_net_pnl

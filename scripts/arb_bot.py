@@ -35,7 +35,7 @@ import sys
 import time
 
 from dotenv import load_dotenv
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -60,13 +60,16 @@ from executor.webhook_alerts import (  # noqa: E402
     chain_trip_hooks,
     make_circuit_breaker_webhook_hook,
 )
+from inventory.fee_tokens import parse_fee_tokens_from_env  # noqa: E402
 from inventory.pnl import ArbRecord, PnLEngine, TradeLeg  # noqa: E402
 from inventory.tracker import InventoryTracker, Venue  # noqa: E402
 from inventory.usd_mark import (  # noqa: E402
     LiveUsdMarkError,
     estimate_inventory_usd,
     estimate_inventory_usd_live,
+    live_usd_per_unit,
     snapshot_pair_mtm_usd,
+    wallet_rollup_qty,
 )
 from monitoring.daily_summary import generate_daily_summary  # noqa: E402
 from monitoring.health_state import (
@@ -299,17 +302,14 @@ _ENV_VIRTUAL_CEX_BALANCES = "ARB_VIRTUAL_CEX_BALANCES"
 _ENV_POOL_REFRESH_SECONDS = "ARB_POOL_REFRESH_SECONDS"
 _DEFAULT_POOL_REFRESH_SECONDS = 5.0
 
-# Symbol aliases the inventory tracker uses when it queries a CEX-style ticker
-# against an on-chain ERC20 reading (Binance trades ETH/BTC, on-chain liquidity
-# uses WETH/WBTC). Keep keys uppercase.
+# Symbol aliases for on-chain ERC20 symbols that must match CEX tickers.
+# Native gas ETH stays under ``ETH``; wrapped ``WETH`` is stored separately —
+# :meth:`InventoryTracker.get_available` for ``Venue.WALLET`` + ``ETH`` sums
+# ``ETH`` + ``WETH`` + ``WBETH`` for trade sizing. Same pattern for ``BTC`` /
+# ``WBTC``.
 #
-# ``USD₮0`` (Tether glyph U+20AE) and ``USDT0`` are the bridged-Tether symbols
-# on Arbitrum One; both must map to plain ``USDT`` so the strategy's inventory
-# check (``get_available(wallet, "USDT")``) finds them under the same key the
-# pair string uses.
+# ``USD₮0`` / ``USDT0`` / ``USDT.E`` → ``USDT`` so ``get_available(wallet, "USDT")`` works.
 _WALLET_SYMBOL_ALIASES: dict[str, str] = {
-    "WETH": "ETH",
-    "WBTC": "BTC",
     "USD\u20ae0": "USDT",  # USD₮0 (Tether glyph U+20AE)
     "USDT0": "USDT",
     "USDT.E": "USDT",
@@ -388,8 +388,8 @@ def _cex_free_decimal(balances: dict[str, Any], asset: str) -> Decimal:
 def _parse_virtual_balances(raw: str) -> dict[str, Decimal]:
     """Parse ``ARB_VIRTUAL_BALANCES`` into ``{SYMBOL: Decimal}`` (silently skips invalid pairs).
 
-    Wallet aliasing is applied (``WETH`` -> ``ETH``, ``WBTC`` -> ``BTC``) so the
-    inventory keys line up with the CEX-style tickers the rest of the bot uses.
+    Bridged stable aliases (e.g. ``USDT0`` -> ``USDT``) match CEX-style keys.
+    ``ETH`` / ``WETH`` are kept separate; sizing rolls them up via inventory.
     """
     out: dict[str, Decimal] = {}
     for chunk in raw.split(","):
@@ -960,7 +960,10 @@ class ArbBot:
             )
             self._maybe_init_pricing_engine()
 
-        self.inventory = InventoryTracker([self._cex_venue, Venue.WALLET])
+        self.inventory = InventoryTracker(
+            [self._cex_venue, Venue.WALLET],
+            fee_token_assets=parse_fee_tokens_from_env(),
+        )
         self.pnl_engine = PnLEngine()
         self._cumulative_arb_pnl: Decimal = Decimal("0")
         self._session_portfolio_start_usd: Optional[Decimal] = None
@@ -1738,6 +1741,23 @@ class ArbBot:
                     if self.config.demo and isinstance(self.exchange, MockExchange):
                         self.exchange.apply_balance_deltas_from_execution(ctx)
                     arb_record = execution_to_arb_record(ctx, cex_venue=self._cex_venue)
+                    fill_sz = ctx.leg1_fill_size or Decimal("0")
+                    cex_px = signal.cex_price if signal.cex_price > 0 else Decimal("0")
+                    trade_value = (
+                        fill_sz * cex_px
+                        if fill_sz > 0 and cex_px > 0
+                        else (
+                            signal.size * cex_px if signal.size > 0 and cex_px > 0 else Decimal("0")
+                        )
+                    )
+                    if trade_value > 0:
+                        try:
+                            arb_record = replace(
+                                arb_record,
+                                executor_fee_bundle_usd=self.fees.total_fee_usd(trade_value),
+                            )
+                        except ValueError:
+                            pass
                     self.pnl_engine.record(arb_record)
                     leg_pnl = arb_record.net_pnl
                     self._cumulative_arb_pnl += leg_pnl
@@ -1936,16 +1956,14 @@ class ArbBot:
                 self.stop()
                 return "mismatch_cex"
 
-        for asset_key, raw_amt in wallet_raw.items():
-            ak = str(asset_key).upper()
-            if ak not in (base, quote):
-                continue
-            expected_w = self.inventory.get_available(Venue.WALLET, ak)
-            actual_w = to_decimal(raw_amt)
+        wallet_upper = {str(k).upper(): to_decimal(v) for k, v in wallet_raw.items()}
+        for asset in (base, quote):
+            expected_w = self.inventory.get_available(Venue.WALLET, asset)
+            actual_w = wallet_rollup_qty(wallet_upper, asset)
             diff_w = abs(expected_w - actual_w)
             if diff_w > tol:
                 msg = (
-                    f"BALANCE MISMATCH WALLET {ak}: tracker={expected_w} "
+                    f"BALANCE MISMATCH WALLET {asset}: tracker={expected_w} "
                     f"actual={actual_w} diff={diff_w} tol={tol}"
                 )
                 logger.critical(msg)
@@ -1971,21 +1989,52 @@ class ArbBot:
                 continue
             b, q = str(d["base"]), str(d["quote"])
             logger.info(
-                "inventory_mtm %s | DEX — %s %s USD | %s %s USD (total %s USD) | "
-                "CEX — %s %s USD | %s %s USD (total %s USD) | "
+                "inventory_mtm %s | DEX — %s %s (~%s USD) | %s %s (~%s USD) | total %s USD | "
+                "CEX — %s %s (~%s USD) | %s %s (~%s USD) | total %s USD | "
                 "sizing/risk use InventoryTracker only",
                 pair,
                 b,
+                _format_dec(d["dex_base_qty"], 6),
                 _format_dec(d["dex_base_usd"], 2),
                 q,
+                _format_dec(d["dex_quote_qty"], 4),
                 _format_dec(d["dex_quote_usd"], 2),
                 _format_dec(d["dex_total_usd"], 2),
                 b,
+                _format_dec(d["cex_base_qty"], 6),
                 _format_dec(d["cex_base_usd"], 2),
                 q,
+                _format_dec(d["cex_quote_qty"], 4),
                 _format_dec(d["cex_quote_usd"], 2),
                 _format_dec(d["cex_total_usd"], 2),
             )
+            self._log_inventory_fee_tokens_gas_line(pair)
+
+    def _log_inventory_fee_tokens_gas_line(self, pair: str) -> None:
+        """Log native gas currency on wallet only (EVM fees are not held on CEX).
+
+        Uses ``snapshot()['fee_tokens']`` when ``ARB_INVENTORY_FEE_TOKENS`` is set.
+        Quantities are the wallet venue row only (e.g. native ETH, not WETH).
+        """
+        ft = self.inventory.snapshot().get("fee_tokens") or {}
+        if not ft:
+            return
+        wx = Venue.WALLET.value
+        parts: list[str] = []
+        for sym in sorted(ft.keys()):
+            row = ft[sym]
+            by_v = row.get("by_venue") or {}
+            wallet_row = by_v.get(wx) or {}
+            wallet_qty = wallet_row.get("total", Decimal("0"))
+            try:
+                px = live_usd_per_unit(sym, self.exchange)
+                w_usd = wallet_qty * px
+                parts.append(
+                    f"{sym} wallet_gas={_format_dec(wallet_qty, 6)} (~{_format_dec(w_usd, 2)} USD)"
+                )
+            except LiveUsdMarkError:
+                parts.append(f"{sym} wallet_gas={_format_dec(wallet_qty, 6)} (USD n/a)")
+        logger.info("inventory_mtm_gas %s | %s", pair, " | ".join(parts))
 
     async def _sync_balances(self) -> None:
         """Pull CEX + on-chain balances into :attr:`inventory` only.
@@ -2049,10 +2098,11 @@ class ArbBot:
         for every token referenced by loaded **V2 and V3** pools on
         :attr:`pricing_engine`, plus the base/quote mints resolved for each
         configured CEX pair (so wallet inventory matches what you actually trade,
-        even when a pool env lists only part of the route). Token symbols are
-        normalized via :data:`_WALLET_SYMBOL_ALIASES` so that wrapped tokens line
-        up with the CEX-style ticker the inventory tracker stores (e.g. ``WETH``
-        → ``ETH``).
+        even when a pool env lists only part of the route).
+        Native balance fills the ``ETH`` row; ``WETH`` ERC20 is stored as ``WETH``.
+        :meth:`InventoryTracker.get_available` on the wallet sums ``ETH`` + ``WETH``
+        + ``WBETH`` when the logical asset is ``ETH``. Stable bridged symbols are
+        still normalized via :data:`_WALLET_SYMBOL_ALIASES`.
 
         When the bot runs with ``--dry-run`` and ``ARB_VIRTUAL_BALANCES`` is set
         (e.g. ``ETH=2,USDC=5000``) the parsed values **override** the on-chain
@@ -2123,16 +2173,7 @@ class ArbBot:
                                 tok.symbol.upper(), tok.symbol.upper()
                             )
                             human = to_decimal(amt.human)
-                            existing = balances.get(sym_norm, Decimal("0"))
-                            # Native ETH already filled the "ETH" slot when we
-                            # alias WETH -> ETH; keep the larger of the two so
-                            # gas-only ETH does not mask a WETH position.
-                            if sym_norm == "ETH" and existing > 0 and human <= 0:
-                                continue
-                            if sym_norm == "ETH":
-                                balances[sym_norm] = max(existing, human)
-                            else:
-                                balances[sym_norm] = human
+                            balances[sym_norm] = human
                             chain_balances_ok = True
                         except Exception as exc:
                             logger.warning(
