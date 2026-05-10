@@ -22,7 +22,7 @@ _ENV_ALLOW_NEGATIVE_PNL_USD = "ARB_ALLOW_NEGATIVE_PNL_USD"
 def _negative_pnl_floor() -> Decimal:
     """Optional non-positive floor read at call time (env may change at runtime)."""
     raw = os.getenv(_ENV_ALLOW_NEGATIVE_PNL_USD, "").strip()
-    if not raw:
+    if not raw or raw == "":
         return Decimal("0")
     try:
         v = Decimal(raw)

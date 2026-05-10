@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
+import time
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any, TypeVar
@@ -110,6 +112,13 @@ class ExchangeClient:
 
         self._rate_limiter = WeightRateLimiter(max_weight=max_w, window_sec=win)
 
+        # OKX v5 ``GET /api/v5/account/trade-fee?instType=SPOT`` — cached max |taker|.
+        self._okx_spot_fee_cache: tuple[float, Decimal | None] | None = None
+        self._okx_spot_fee_ttl_sec = max(
+            60.0,
+            float((os.getenv("ARB_OKX_TRADE_FEE_REFRESH_SEC", "") or "3600").strip() or "3600"),
+        )
+
         self._health_check()
 
     @property
@@ -121,6 +130,14 @@ class ExchangeClient:
         if v is None:
             return Decimal("0")
         return Decimal(str(v))
+
+    @staticmethod
+    def _abs_fee_ratio(raw: Any) -> Decimal:
+        """Spot fee ratios are positive fractions; OKX returns negative for *charged*."""
+        d = ExchangeClient.to_decimal(raw)
+        if d == 0:
+            return Decimal("0")
+        return abs(d)
 
     @staticmethod
     def _validate_symbol(symbol: str) -> None:
@@ -193,6 +210,12 @@ class ExchangeClient:
             if not isinstance(result, dict):
                 return repr(result)[:500]
             return f"maker={result.get('maker')} taker={result.get('taker')}"
+        if operation == "okx_account_trade_fee":
+            if not isinstance(result, dict):
+                return repr(result)[:500]
+            data = result.get("data")
+            n = len(data) if isinstance(data, list) else 0
+            return f"code={result.get('code')} data_rows={n}"
         if operation == "fetch_time":
             return f"server_time_ms={result}"
         return repr(result)[:500]
@@ -468,20 +491,89 @@ class ExchangeClient:
             lambda: self.client.fetch_trading_fee(symbol, params or {}),
         )
         return {
-            "maker": self.to_decimal(raw.get("maker")),
-            "taker": self.to_decimal(raw.get("taker")),
+            "maker": self._abs_fee_ratio(raw.get("maker")),
+            "taker": self._abs_fee_ratio(raw.get("taker")),
         }
+
+    def _okx_spot_account_max_taker_ratio(self) -> Decimal | None:
+        """OKX ``GET /api/v5/account/trade-fee`` with ``instType=SPOT`` (CCXT private).
+
+        Returns the maximum ``abs(taker)`` across ``data`` rows (account tier).
+        Cached for ``ARB_OKX_TRADE_FEE_REFRESH_SEC`` (default 3600s). On failure,
+        returns ``None`` so callers can fall back to per-symbol ``fetch_trading_fee``.
+        """
+        now = time.monotonic()
+        if self._okx_spot_fee_cache is not None:
+            ts, cached = self._okx_spot_fee_cache
+            if (now - ts) < self._okx_spot_fee_ttl_sec:
+                return cached if cached is not None and cached > 0 else None
+
+        try:
+            raw = self._ccxt_request(
+                "okx_account_trade_fee",
+                4,
+                lambda: self.client.private_get_account_trade_fee({"instType": "SPOT"}),
+            )
+        except Exception as exc:
+            logger.warning("OKX account trade-fee (SPOT) failed: %s", exc)
+            self._okx_spot_fee_cache = (now, None)
+            return None
+
+        data = raw.get("data")
+        if not isinstance(data, list):
+            self._okx_spot_fee_cache = (now, None)
+            return None
+
+        best = Decimal("0")
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            t = row.get("taker")
+            if t is None or t == "":
+                continue
+            td = self._abs_fee_ratio(t)
+            if td > best:
+                best = td
+
+        if best <= 0:
+            self._okx_spot_fee_cache = (now, None)
+            return None
+
+        self._okx_spot_fee_cache = (now, best)
+        return best
 
     def max_taker_fee_bps_for_symbols(self, symbols: list[str]) -> Decimal | None:
         """Return the maximum CCXT **taker** fee in bps across ``symbols``.
 
-        Uses :meth:`get_trading_fees` per symbol. Returns ``None`` if every lookup
-        fails or yields a non-positive taker ratio. Ratios above **5%** (500 bps)
-        per symbol are ignored as bad data.
+        **OKX:** prefers one cached ``account/trade-fee`` (``instType=SPOT``) call
+        (max ``|taker|`` in ``data``), then falls back to :meth:`get_trading_fees`
+        per symbol. **Other venues:** :meth:`get_trading_fees` per symbol.
+
+        Returns ``None`` if every lookup fails or yields a non-positive taker ratio.
+        Ratios above **5%** (500 bps) per symbol are ignored as bad data.
         """
         if not symbols:
             return None
         cap_bps = Decimal("500")
+
+        if self._exchange_id == "okx":
+            bulk = self._okx_spot_account_max_taker_ratio()
+            if bulk is not None and bulk > 0:
+                try:
+                    bps = cex_taker_bps_from_ccxt_ratio(bulk)
+                except ValueError:
+                    bps = None
+                else:
+                    if bps > cap_bps:
+                        logger.warning(
+                            "OKX account trade-fee taker bps implausibly high (%s > %s), "
+                            "falling back to per-symbol fetch",
+                            bps,
+                            cap_bps,
+                        )
+                    else:
+                        return bps
+
         best: Decimal | None = None
         for sym in symbols:
             try:
@@ -489,7 +581,7 @@ class ExchangeClient:
                 taker = row.get("taker")
                 if taker is None:
                     continue
-                td = self.to_decimal(taker)
+                td = self._abs_fee_ratio(taker)
                 if td <= 0:
                     logger.warning("CEX taker fee missing or zero for %s", sym)
                     continue

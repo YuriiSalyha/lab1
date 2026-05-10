@@ -330,3 +330,50 @@ def test_max_taker_fee_bps_skips_failed_symbol(client, mock_ccxt_binance):
     ]
     bps = client.max_taker_fee_bps_for_symbols(["ETH/USDT", "BTC/USDT"])
     assert bps == Decimal("10")
+
+
+@pytest.fixture
+def mock_ccxt_okx():
+    ex = MagicMock()
+    ex.fetch_time.return_value = 1_700_000_000_000
+    ex.enableRateLimit = True
+    ex.enableLastResponseHeaders = True
+    ex.last_response_headers = {}
+    return ex
+
+
+@pytest.fixture
+def okx_client(mock_ccxt_okx):
+    with patch("exchange.client.ccxt.okx", return_value=mock_ccxt_okx):
+        return ExchangeClient(
+            {"apiKey": "k", "secret": "s", "password": "p"},
+            exchange_id="okx",
+        )
+
+
+def test_get_trading_fees_normalizes_okx_negative_taker(okx_client, mock_ccxt_okx):
+    mock_ccxt_okx.fetch_trading_fee.return_value = {"maker": "-0.0008", "taker": "-0.001"}
+    fees = okx_client.get_trading_fees("ETH/USDT")
+    assert fees["taker"] == Decimal("0.001")
+    assert fees["maker"] == Decimal("0.0008")
+
+
+def test_okx_max_taker_prefers_account_trade_fee(okx_client, mock_ccxt_okx):
+    mock_ccxt_okx.private_get_account_trade_fee.return_value = {
+        "code": "0",
+        "data": [{"taker": "-0.001", "maker": "-0.0008"}],
+    }
+    bps = okx_client.max_taker_fee_bps_for_symbols(["ETH/USDT"])
+    assert bps == Decimal("10")
+    mock_ccxt_okx.private_get_account_trade_fee.assert_called_once_with({"instType": "SPOT"})
+    mock_ccxt_okx.fetch_trading_fee.assert_not_called()
+    bps2 = okx_client.max_taker_fee_bps_for_symbols(["ETH/USDT"])
+    assert bps2 == Decimal("10")
+    assert mock_ccxt_okx.private_get_account_trade_fee.call_count == 1
+
+
+def test_okx_max_taker_falls_back_when_bulk_fails(okx_client, mock_ccxt_okx):
+    mock_ccxt_okx.private_get_account_trade_fee.side_effect = Exception("auth")
+    mock_ccxt_okx.fetch_trading_fee.return_value = {"maker": "0", "taker": "-0.001"}
+    bps = okx_client.max_taker_fee_bps_for_symbols(["ETH/USDT"])
+    assert bps == Decimal("10")

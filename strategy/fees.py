@@ -16,7 +16,7 @@ from strategy.signal import to_decimal
 BPS_DENOM = Decimal("10000")
 DEFAULT_CEX_TAKER_BPS = Decimal("10")
 DEFAULT_DEX_SWAP_BPS = Decimal("30")
-DEFAULT_GAS_COST_USD = Decimal("0.10")
+DEFAULT_GAS_COST_USD = Decimal("0.009")
 
 
 def cex_taker_bps_from_ccxt_ratio(taker_ratio: Any) -> Decimal:

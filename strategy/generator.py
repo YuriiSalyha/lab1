@@ -30,7 +30,7 @@ DEFAULT_MAX_POSITION_USD = Decimal("10000")
 DEFAULT_SIGNAL_TTL_S = Decimal("5")
 DEFAULT_COOLDOWN_S = Decimal("2")
 # Probe base size when ``size`` is omitted (DEX quotes may depend on size).
-DEFAULT_OPTIMAL_SIZE_PROBE_BASE = Decimal("0.01")
+DEFAULT_OPTIMAL_SIZE_PROBE_BASE = Decimal("0.001")
 # Grid resolution when :class:`PricingEngine` quotes vary with trade size.
 OPTIMAL_SIZE_GRID_SAMPLES = 12
 # Floor on trade USD notional considered for sizing — avoids gas-dominated dust trades.

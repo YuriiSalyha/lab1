@@ -363,6 +363,7 @@ def test_export_csv_format(tmp_path: Path):
         buy_leg=buy,
         sell_leg=sell,
         gas_cost_usd=Decimal("0.5"),
+        dex_tx_hash="0xdexabc",
     )
     eng = PnLEngine()
     eng.record(r)
@@ -370,6 +371,32 @@ def test_export_csv_format(tmp_path: Path):
     eng.export_csv(str(path))
     text = path.read_text(encoding="utf-8")
     assert "gross_pnl_usd" in text
+    assert "transaction_hash" in text
     assert "arb1" in text
     assert "binance" in text
     assert str(r.net_pnl) in text.replace(",", "")
+    assert "0xdexabc" in text
+
+
+def test_recent_includes_transaction_hash():
+    buy = _leg("b", Venue.BINANCE, "buy", "1", "2000", "0", "USDT")
+    sell = _leg("s", Venue.WALLET, "sell", "1", "2010", "0", "USDT")
+    r = ArbRecord(
+        id="t0",
+        timestamp=buy.timestamp,
+        buy_leg=buy,
+        sell_leg=sell,
+        dex_tx_hash="0x111",
+    )
+    eng = PnLEngine()
+    eng.record(r)
+    row = eng.recent(1)[0]
+    assert row["transaction_hash"] == "0x111"
+    r_empty = ArbRecord(
+        id="t1",
+        timestamp=buy.timestamp,
+        buy_leg=buy,
+        sell_leg=sell,
+    )
+    eng.record(r_empty)
+    assert eng.recent(1)[0]["transaction_hash"] == ""

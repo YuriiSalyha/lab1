@@ -464,11 +464,11 @@ def _format_dec(value: Optional[Decimal], places: int) -> str:
 
 
 def _format_usd_profit(value: Optional[Decimal]) -> str:
-    """USD for console: ``$1.23`` or ``-$1.23`` (never ``$-1.23``)."""
+    """USD for per-tick console ``est_profit``; 3 fraction digits (e.g. ``-$0.040``)."""
     if value is None:
-        return "$0.00"
+        return "$0.000"
     d = to_decimal(value)
-    body = _format_dec(abs(d), 2)
+    body = _format_dec(abs(d), 3)
     if d < 0:
         return f"-${body}"
     return f"${body}"

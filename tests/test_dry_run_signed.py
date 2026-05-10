@@ -90,7 +90,7 @@ def test_console_line_no_signal_shows_dex_spot_vs_cex_mid_spread() -> None:
     assert "ask 3450.85 x 0.9100 ETH" in line
     assert "dex 3455.25 (spot)" in line
     assert "spread 14 bps" in line
-    assert "est_profit $0.00" in line
+    assert "est_profit $0.000" in line
     assert "sent=NO reason=no_opportunity" in line
 
 
@@ -118,7 +118,7 @@ def test_console_line_no_signal_shows_negative_hypothetical_profit() -> None:
         signal=None,
         sent="NO reason=below_min_profit",
     )
-    assert "est_profit -$2.50 (sell 0.010000 ETH on DEX)" in line
+    assert "est_profit -$2.500 (sell 0.010000 ETH on DEX)" in line
 
 
 def test_console_line_with_signal_still_shows_dex_spot_when_available() -> None:
@@ -130,7 +130,7 @@ def test_console_line_with_signal_still_shows_dex_spot_when_available() -> None:
     )
     assert "dex 3455.25 (spot)" in line
     assert "spread 30 bps" in line
-    assert "est_profit $1.84 (sell 0.050000 ETH on DEX)" in line
+    assert "est_profit $1.840 (sell 0.050000 ETH on DEX)" in line
     assert "sent=NO (DRY-RUN signed_tx=0xDRYRUNabc)" in line
 
 
@@ -141,7 +141,7 @@ def test_console_line_handles_missing_snapshot() -> None:
     assert "bid N/A" in line
     assert "ask N/A" in line
     assert "dex N/A" in line
-    assert "est_profit $0.00" in line
+    assert "est_profit $0.000" in line
 
 
 def test_dryrun_signed_telegram_contains_signed_marker() -> None:

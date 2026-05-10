@@ -12,11 +12,13 @@ bot can run the full production pipeline (route + fork preflight + EIP-1559 buil
 from __future__ import annotations
 
 import logging
+import os
 import time
 from decimal import Decimal
 from typing import Any, Callable, Optional
 
 from chain.builder import TransactionBuilder
+from chain.erc20_approve import ensure_router_allowance
 from chain.uniswap_v2_router import encode_uniswap_v2_swap_calldata
 from chain.uniswap_v3_router import (
     encode_exact_input_single_calldata,
@@ -25,7 +27,7 @@ from chain.uniswap_v3_router import (
 )
 from core.types import Address, Token, TokenAmount
 from core.wallet import WalletManager
-from pricing.fork_simulator import ForkSimulator
+from pricing.fork_simulator import ForkSimulator, SimulationResult
 from pricing.fork_swap_executor import broadcast_router_calldata
 from pricing.pricing_engine import PricingEngine
 from strategy.dex_token_resolver import find_pool_for_pair
@@ -161,7 +163,6 @@ def sync_execute_live_dex_leg(
 
     sender = Address.from_string(wallet.address)
     deadline = int(time.time()) + int(deadline_seconds) + DEADLINE_BUFFER_S
-    rpc_url = client.rpc_urls[0]
     buys = dex_leg_buys_base(direction)
     parts = signal.pair.strip().upper().split("/")
     base_sym, quote_sym = parts[0], parts[1]
@@ -298,9 +299,78 @@ def sync_execute_live_dex_leg(
                     "deadline": deadline,
                 }
 
+        # Ensure the router has ERC-20 allowance for the **input** token before
+        # preflight or broadcast. Without it, every V2/V3 swap reverts with
+        # ``TransferHelper: TRANSFER_FROM_FAILED`` inside ``safeTransferFrom``.
+        # ``ensure_router_allowance`` is idempotent + memoized, so this costs
+        # one chain read on the steady state and exactly one ``approve`` tx
+        # the first time the bot sees a given (token_in, router) pair.
+        # Skip in dry-run-signed: that mode never broadcasts the swap so
+        # spending gas on a real approve would defeat the dry-run guarantee.
+        allowance_info: dict[str, Any] = {}
+        if not dry_run:
+            if buys:
+                token_in_addr = quote_t.address
+                # ``amount_in_max`` was set on both V2 and V3 buy branches.
+                min_allowance = int(amount_in_max)  # type: ignore[possibly-undefined]
+            else:
+                token_in_addr = base_t.address
+                min_allowance = int(base_raw)
+            try:
+                allowance_info = ensure_router_allowance(
+                    client=client,
+                    wallet=wallet,
+                    token=token_in_addr,
+                    spender=router,
+                    min_amount=min_allowance,
+                )
+            except Exception as approve_exc:  # noqa: BLE001
+                logger.warning("router allowance check/approve failed: %s", approve_exc)
+                return {
+                    "success": False,
+                    "price": signal.dex_price,
+                    "filled": Decimal("0"),
+                    "error": f"approve_failed:{approve_exc}",
+                    "dry_run": dry_run,
+                }
+            # Public RPC clusters can serve a different ``latest`` on a second HTTP
+            # connection; preflight used a fresh Web3 provider and reverted with
+            # ``TRANSFER_FROM_FAILED`` even after a mined approve on the primary
+            # client. Re-use ChainClient.w3 for simulation and give state a moment
+            # to propagate when we just broadcast approve.
+            if allowance_info.get("approved") is True:
+                delay_s = float(os.environ.get("DEX_POST_APPROVE_DELAY_SEC", "1.5"))
+                if delay_s > 0:
+                    logger.info(
+                        "DEX post-approve delay %.2fs before preflight",
+                        delay_s,
+                    )
+                    time.sleep(delay_s)
+
         preflight_gas_used: Optional[int] = None
         if run_preflight:
-            sim = ForkSimulator(rpc_url).simulate_swap(router, swap_params, sender)
+            max_attempts = max(1, int(os.environ.get("DEX_PREFLIGHT_RETRIES", "5")))
+            backoff = float(os.environ.get("DEX_PREFLIGHT_RETRY_BACKOFF_SEC", "0.5"))
+            fork = ForkSimulator(w3=client.w3)
+            sim: SimulationResult | None = None
+            for attempt in range(max_attempts):
+                sim = fork.simulate_swap(router, swap_params, sender)
+                if sim.success:
+                    break
+                err = (sim.error or "").upper()
+                if attempt + 1 < max_attempts and "TRANSFER_FROM" in err:
+                    wait_s = backoff * (2**attempt)
+                    logger.info(
+                        "DEX preflight retry %s/%s after %.2fs (%s)",
+                        attempt + 1,
+                        max_attempts,
+                        wait_s,
+                        sim.error,
+                    )
+                    time.sleep(wait_s)
+                    continue
+                break
+            assert sim is not None
             if not sim.success:
                 return {
                     "success": False,

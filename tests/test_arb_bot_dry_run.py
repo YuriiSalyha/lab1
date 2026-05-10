@@ -26,16 +26,8 @@ def test_dry_run_never_calls_execute(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_ex.assert_not_awaited()
 
 
-def test_resolve_live_fee_structure_manual_bps(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ARB_CEX_TAKER_BPS", "12")
-    ex = MagicMock()
-    fs = _resolve_live_fee_structure(ex, ["ETH/USDT"])
-    assert fs.cex_taker_bps == Decimal("12")
-    ex.max_taker_fee_bps_for_symbols.assert_not_called()
-
-
 def test_resolve_live_fee_structure_from_exchange(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ARB_CEX_TAKER_BPS", raising=False)
+    monkeypatch.delenv("ARB_GAS_COST_USD", raising=False)
     ex = MagicMock()
     ex.max_taker_fee_bps_for_symbols.return_value = Decimal("9")
     fs = _resolve_live_fee_structure(ex, ["ETH/USDT", "BTC/USDT"])
@@ -43,21 +35,22 @@ def test_resolve_live_fee_structure_from_exchange(monkeypatch: pytest.MonkeyPatc
     ex.max_taker_fee_bps_for_symbols.assert_called_once_with(["ETH/USDT", "BTC/USDT"])
 
 
-def test_resolve_live_fee_structure_invalid_manual_falls_back(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("ARB_CEX_TAKER_BPS", "not_a_number")
-    ex = MagicMock()
-    ex.max_taker_fee_bps_for_symbols.return_value = Decimal("8")
-    fs = _resolve_live_fee_structure(ex, ["ETH/USDT"])
-    assert fs.cex_taker_bps == Decimal("8")
-
-
 def test_resolve_live_fee_structure_default_when_fetch_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ARB_CEX_TAKER_BPS", raising=False)
+    monkeypatch.delenv("ARB_GAS_COST_USD", raising=False)
     ex = MagicMock()
     ex.max_taker_fee_bps_for_symbols.return_value = None
     fs = _resolve_live_fee_structure(ex, ["ETH/USDT"])
+    assert fs.cex_taker_bps == Decimal("10")
+
+
+def test_resolve_live_fee_structure_respects_manual_gas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ARB_GAS_COST_USD", "0.009")
+    ex = MagicMock()
+    ex.max_taker_fee_bps_for_symbols.return_value = Decimal("10")
+    fs = _resolve_live_fee_structure(ex, ["ETH/USDT"])
+    assert fs.gas_cost_usd == Decimal("0.009")
     assert fs.cex_taker_bps == Decimal("10")

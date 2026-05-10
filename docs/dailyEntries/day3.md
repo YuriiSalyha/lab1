@@ -1,0 +1,31 @@
+## Day 3 — 09.05.2026
+
+### Numbers
+-Starting capital: $102.7
+-Ending capital: $102.04
+-PnL: $XX
+-Trades: 2 (0 wins, 2 losses)
+-Win rate: 0%
+-Best trade: $-0.02197410431031481851510816109
+-Worst trade: $-0.02198905331821787633462982139
+-Fees paid: $0,002 (CEX) + $0.006 (DEX) + $0.042 (DEX gas) + 0.03(rebalancing fees)
+
+### What Happened
+- I lauched again to check again if my tx will happend. After it, I changed bot
+to make him accept only a positif trades, which I didn't get for half of a day
+
+### Problems Encountered
+- Just to break even, I need spread of at least 41 bps, which is
+really hard to catch without any signals
+
+### Changes Made
+- DEX and CEX fees are now fetched via etherscan API
+- Added tx hash to CSV exports
+
+### Lessons Learned
+- I would preffer to not trade on weekends cause other bots are always active
+but humans make less trades on DEX which lowers opportunities.
+
+### Tomorrow's Plan
+- Lauch a script for a whole night, lower expected profit, push trade limit higher
+and look for any possible bugs and improvements.
