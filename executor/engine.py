@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_LEG1_TIMEOUT_S = 5.0
 DEFAULT_LEG2_TIMEOUT_S = 60.0
 DEFAULT_MIN_FILL_RATIO = Decimal("0.8")
-# CEX limit price is padded vs the quoted price so IOC crosses the book.
+# IOC limit vs signal CEX quote: multiply for buys, divide for sells (see ``_execute_cex_leg``).
 CEX_SLIPPAGE_PAD = Decimal("1.001")
 
 # Simulation-mode fill adjustments (intentionally small so PnL stays close to expected).
@@ -349,8 +349,12 @@ class Executor:
                 "filled": size_d,
             }
         side = "buy" if signal.direction == Direction.BUY_CEX_SELL_DEX else "sell"
-        # Pad limit price so IOC crosses; ExchangeClient floors input to Decimal.
-        limit_price = signal.cex_price * CEX_SLIPPAGE_PAD
+        # Pad limit so IOC crosses: buys pay up to quote*pad; sells accept down to quote/pad.
+        limit_price = (
+            signal.cex_price * CEX_SLIPPAGE_PAD
+            if side == "buy"
+            else signal.cex_price / CEX_SLIPPAGE_PAD
+        )
         result = self.exchange.create_limit_ioc_order(
             symbol=signal.pair,
             side=side,
@@ -358,11 +362,18 @@ class Executor:
             price=float(limit_price),
         )
         status = result.get("status")
+        filled = to_decimal(result.get("amount_filled"))
+        avg_px = to_decimal(result.get("avg_fill_price"))
+
+        success = status in {"filled", "closed"} or (filled > 0 and avg_px > 0)
+        err: str | None = None
+        if not success:
+            err = f"CEX_IOC status={status!r} filled={filled} avg_px={avg_px}"
         return {
-            "success": status in {"filled", "closed"},
-            "price": to_decimal(result.get("avg_fill_price")),
-            "filled": to_decimal(result.get("amount_filled")),
-            "error": status,
+            "success": success,
+            "price": avg_px,
+            "filled": filled,
+            "error": err,
         }
 
     async def _execute_dex_leg(self, signal: Signal, size: Decimal) -> dict[str, Any]:

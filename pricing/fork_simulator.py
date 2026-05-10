@@ -110,8 +110,13 @@ class SimulationResult:
 class ForkSimulator:
     """Simulates router swaps on a local Anvil/Hardhat fork using ``eth_call``."""
 
-    def __init__(self, fork_url: str) -> None:
-        self.w3 = Web3(Web3.HTTPProvider(fork_url))
+    def __init__(self, fork_url: str | None = None, *, w3: Any | None = None) -> None:
+        if w3 is not None:
+            self.w3 = w3
+        elif fork_url:
+            self.w3 = Web3(Web3.HTTPProvider(fork_url))
+        else:
+            raise ValueError("ForkSimulator requires fork_url or keyword argument w3")
 
     def simulate_swap(
         self,

@@ -22,6 +22,7 @@ from config.config import BINANCE_CONFIG
 from core.types import Address
 from core.wallet import WalletManager
 from exchange.client import ExchangeClient
+from inventory.fee_tokens import parse_fee_tokens_from_env
 from inventory.tracker import InventoryTracker, Venue
 
 
@@ -62,7 +63,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = p.parse_args(argv)
 
-    tracker = InventoryTracker([Venue.BINANCE, Venue.WALLET])
+    tracker = InventoryTracker(
+        [Venue.BINANCE, Venue.WALLET],
+        fee_token_assets=parse_fee_tokens_from_env(),
+    )
     notes: list[str] = []
 
     xc = ExchangeClient(BINANCE_CONFIG)

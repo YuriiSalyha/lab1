@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 
 from core.types import Address, TokenAmount
 from exchange.client import ExchangeClient
+from inventory.fee_tokens import parse_fee_tokens_from_env
 from inventory.pnl import PnLEngine
 from inventory.tracker import InventoryTracker, Venue
 from pricing.price_impact_analyzer import impact_row_for_amount
@@ -333,13 +334,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument(
         "--cex",
         default="binance",
-        choices=("binance", "bybit"),
+        choices=("binance", "bybit", "okx"),
         help="CEX venue for order book + inventory leg (default binance)",
     )
     args = p.parse_args(argv)
 
     from chain.client import ChainClient
-    from config.config import BINANCE_CONFIG, BYBIT_CONFIG
+    from config.config import BINANCE_CONFIG, BYBIT_CONFIG, OKX_CONFIG
 
     rpc = _rpc_from_env(args.rpc)
     pool_hex = _pool_from_env(args.pool)
@@ -353,9 +354,17 @@ def main(argv: list[str] | None = None) -> None:
     engine.load_pools([Address.from_string(pool_hex)])
 
     cex_venue = Venue(args.cex)
-    cfg = BYBIT_CONFIG if cex_venue == Venue.BYBIT else BINANCE_CONFIG
+    if cex_venue == Venue.BYBIT:
+        cfg = BYBIT_CONFIG
+    elif cex_venue == Venue.OKX:
+        cfg = OKX_CONFIG
+    else:
+        cfg = BINANCE_CONFIG
     xc = ExchangeClient(cfg, exchange_id=cex_venue.value)
-    tracker = InventoryTracker([cex_venue, Venue.WALLET])
+    tracker = InventoryTracker(
+        [cex_venue, Venue.WALLET],
+        fee_token_assets=parse_fee_tokens_from_env(),
+    )
     try:
         bal = xc.fetch_balance()
         tracker.update_from_cex(cex_venue, bal)

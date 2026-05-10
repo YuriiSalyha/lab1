@@ -11,9 +11,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from core.types import Address, Token
 from inventory.tracker import InventoryTracker, Venue
 from strategy.fees import FeeStructure, cex_taker_bps_from_ccxt_ratio
-from strategy.generator import SignalGenerator
+from strategy.generator import DexQuotesUnavailableError, SignalGenerator
 from strategy.scorer import (
     INVENTORY_OK_SCORE,
     INVENTORY_PENALTY_SCORE,
@@ -85,11 +86,30 @@ def fees() -> FeeStructure:
     )
 
 
+_ETH_ADDR = Address("0x1111111111111111111111111111111111111111")
+_USDT_ADDR = Address("0x2222222222222222222222222222222222222222")
+
+
+def _eth_usdt_tokens() -> tuple[Token, Token]:
+    return Token(_ETH_ADDR, "ETH", 18), Token(_USDT_ADDR, "USDT", 18)
+
+
+def _pricing_triplet_profitable() -> MagicMock:
+    """On-chain-style triple: spot gap vs CEX; execution legs at probe size."""
+    mid = Decimal("2000.5")
+    spot = mid * Decimal("1.015")
+    dex_buy = mid * Decimal("1.010")
+    dex_sell = mid * Decimal("1.013")
+    m = MagicMock()
+    m.get_pair_prices_math = MagicMock(return_value=(dex_buy, dex_sell, spot))
+    return m
+
+
 @pytest.fixture
 def generator(mock_exchange, tracker, fees) -> SignalGenerator:
     return SignalGenerator(
         mock_exchange,
-        None,  # no pricing module -> stub DEX prices
+        _pricing_triplet_profitable(),
         tracker,
         fees,
         {
@@ -97,6 +117,7 @@ def generator(mock_exchange, tracker, fees) -> SignalGenerator:
             "min_profit_usd": Decimal("0.1"),
             "cooldown_seconds": 2.0,
         },
+        token_resolver=lambda _pair: _eth_usdt_tokens(),
     )
 
 
@@ -104,7 +125,7 @@ def generator(mock_exchange, tracker, fees) -> SignalGenerator:
 
 
 def test_generate_signal_profitable(generator):
-    """Stub DEX is 0.8% above mid, so the spread always beats 50 bps."""
+    """Mocked pool math yields a spot edge above ``min_spread_bps`` and profitable execution."""
     signal = generator.generate("ETH/USDT", Decimal("0.1"))
     assert signal is not None
     assert signal.spread_bps > Decimal("50")
@@ -116,14 +137,86 @@ def test_generate_signal_profitable(generator):
 
 def test_generate_signal_no_opportunity(mock_exchange, tracker, fees):
     """Minimum spread set very high -> generator returns None."""
+    pr = MagicMock()
+    pr.get_pair_prices_math = MagicMock(
+        return_value=(Decimal("2000.5"), Decimal("2000.5"), Decimal("3000")),
+    )
+    gen = SignalGenerator(
+        mock_exchange,
+        pr,
+        tracker,
+        fees,
+        {"min_spread_bps": Decimal("10000"), "cooldown_seconds": 0},
+        token_resolver=lambda _pair: _eth_usdt_tokens(),
+    )
+    assert gen.generate("ETH/USDT", Decimal("0.1")) is None
+
+
+def test_generate_signal_symmetric_min_spread_allows_large_negative_spot(
+    mock_exchange, tracker, fees
+):
+    """Positive min_spread_bps gates on |spot edge|: strong negative leg passes."""
+    ex = MagicMock()
+    ex.fetch_order_book.return_value = _book(Decimal("1990"), Decimal("2000.01"))
+    pr = MagicMock()
+    pr.get_pair_prices_math = MagicMock(
+        return_value=(Decimal("1995"), Decimal("2005"), Decimal("2000")),
+    )
+    gen = SignalGenerator(
+        ex,
+        pr,
+        tracker,
+        fees,
+        {
+            "min_spread_bps": Decimal("10"),
+            "min_profit_usd": Decimal("-1000"),
+            "cooldown_seconds": 0,
+        },
+        token_resolver=lambda _pair: _eth_usdt_tokens(),
+    )
+    sig = gen.generate("ETH/USDT", Decimal("0.1"))
+    assert sig is not None
+    assert sig.direction == Direction.BUY_DEX_SELL_CEX
+
+
+def test_generator_raises_without_pricing_engine(mock_exchange, tracker, fees):
     gen = SignalGenerator(
         mock_exchange,
         None,
         tracker,
         fees,
-        {"min_spread_bps": Decimal("10000"), "cooldown_seconds": 0},
+        {"cooldown_seconds": 0},
     )
-    assert gen.generate("ETH/USDT", Decimal("0.1")) is None
+    with pytest.raises(DexQuotesUnavailableError):
+        gen.generate("ETH/USDT", Decimal("0.1"))
+
+
+def test_generator_zeroes_dex_swap_bps_when_pricing_engine_present(mock_exchange, tracker, fees):
+    """Pool fee is in dex_buy/sell already; FeeStructure.dex_swap_bps must not double-count."""
+    gen = SignalGenerator(
+        mock_exchange,
+        _pricing_triplet_profitable(),
+        tracker,
+        fees,
+        {"cooldown_seconds": 0},
+        token_resolver=lambda _pair: _eth_usdt_tokens(),
+    )
+    assert gen.fees.dex_swap_bps == Decimal("0")
+    # Other fee fields preserved.
+    assert gen.fees.cex_taker_bps == fees.cex_taker_bps
+    assert gen.fees.gas_cost_usd == fees.gas_cost_usd
+
+
+def test_generator_keeps_dex_swap_bps_without_pricing_engine(mock_exchange, tracker, fees):
+    """No engine path -> stub fee model untouched (legacy / test paths)."""
+    gen = SignalGenerator(
+        mock_exchange,
+        None,
+        tracker,
+        fees,
+        {"cooldown_seconds": 0},
+    )
+    assert gen.fees is fees
 
 
 def test_cooldown_prevents_rapid_signals(generator, monkeypatch):
@@ -143,12 +236,13 @@ def test_direction_selection(generator, monkeypatch):
     """Prices crafted so BUY_DEX_SELL_CEX wins (CEX bid >> DEX buy)."""
 
     def fake_prices(pair, size):
-        # cex_bid 2200, cex_ask 2100, dex_buy/sell 2000 -> spread_b dominates.
+        # cex_bid 2200, cex_ask 2100, dex_buy/sell 2000, spot 2000 -> spot spread_b dominates.
         return {
             "cex_bid": Decimal("2200"),
             "cex_ask": Decimal("2100"),
             "dex_buy": Decimal("2000"),
             "dex_sell": Decimal("2000"),
+            "dex_spot": Decimal("2000"),
         }
 
     monkeypatch.setattr(generator, "_fetch_prices", fake_prices)
@@ -162,10 +256,11 @@ def test_inventory_insufficient_sets_flag(mock_exchange, fees):
     empty = InventoryTracker([Venue.BINANCE, Venue.WALLET])
     gen = SignalGenerator(
         mock_exchange,
-        None,
+        _pricing_triplet_profitable(),
         empty,
         fees,
         {"min_spread_bps": Decimal("50"), "min_profit_usd": Decimal("0"), "cooldown_seconds": 0},
+        token_resolver=lambda _pair: _eth_usdt_tokens(),
     )
     signal = gen.generate("ETH/USDT", Decimal("0.1"))
     assert signal is not None
@@ -388,7 +483,7 @@ def test_generate_within_limits_flag(mock_exchange, tracker, fees):
     """Size pushing notional past max_position_usd flips within_limits flag."""
     gen = SignalGenerator(
         mock_exchange,
-        None,
+        _pricing_triplet_profitable(),
         tracker,
         fees,
         {
@@ -397,6 +492,7 @@ def test_generate_within_limits_flag(mock_exchange, tracker, fees):
             "max_position_usd": Decimal("10"),
             "cooldown_seconds": 0,
         },
+        token_resolver=lambda _pair: _eth_usdt_tokens(),
     )
     sig = gen.generate("ETH/USDT", Decimal("0.1"))
     assert sig is not None

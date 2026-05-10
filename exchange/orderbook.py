@@ -9,6 +9,7 @@ import copy
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 
 
 def _d(x) -> Decimal:
@@ -26,12 +27,15 @@ def _fmt_qty(d: Decimal, max_dp: int = 4) -> str:
     return s
 
 
-def _imbalance_label(ratio: float) -> str:
-    if ratio > 0.25:
+def _imbalance_label(ratio: Decimal) -> str:
+    hi = Decimal("0.25")
+    lo = Decimal("-0.25")
+    tiny = Decimal("0.05")
+    if ratio > hi:
         return "buy pressure"
-    if ratio < -0.25:
+    if ratio < lo:
         return "sell pressure"
-    if abs(ratio) < 0.05:
+    if abs(ratio) < tiny:
         return "balanced"
     return "slight buy pressure" if ratio > 0 else "slight sell pressure"
 
@@ -52,7 +56,7 @@ class OrderBookAnalyzer:
     def walk_the_book(
         self,
         side: str,  # "buy" (walk asks) or "sell" (walk bids)
-        qty: float,
+        qty: Any,
     ) -> dict:
         """
         Simulate filling ``qty`` base against the book.
@@ -134,7 +138,7 @@ class OrderBookAnalyzer:
             "fills": fills,
         }
 
-    def _depth_base_and_quote(self, side: str, bps: float) -> tuple[Decimal, Decimal]:
+    def _depth_base_and_quote(self, side: str, bps: Any) -> tuple[Decimal, Decimal]:
         """Sum base quantity and quote notional within ``bps`` of the best price."""
         bps_d = _d(bps)
         if bps_d < 0:
@@ -174,7 +178,7 @@ class OrderBookAnalyzer:
 
         raise ValueError("side must be 'bid' or 'ask'")
 
-    def depth_at_bps(self, side: str, bps: float) -> Decimal:
+    def depth_at_bps(self, side: str, bps: Any) -> Decimal:
         """
         Total base quantity available within ``bps`` basis points of the best price
         on that side (bids: downward from best bid; asks: upward from best ask).
@@ -182,9 +186,9 @@ class OrderBookAnalyzer:
         base, _ = self._depth_base_and_quote(side, bps)
         return base
 
-    def imbalance(self, levels: int = 10) -> float:
+    def imbalance(self, levels: int = 10) -> Decimal:
         """
-        Imbalance in [-1.0, +1.0]: (bid_vol - ask_vol) / (bid_vol + ask_vol)
+        Imbalance in [-1, +1]: (bid_vol - ask_vol) / (bid_vol + ask_vol)
         over the first ``levels`` on each side.
         """
         if levels < 1:
@@ -195,8 +199,8 @@ class OrderBookAnalyzer:
         ask_vol = sum(_d(q[1]) for q in asks)
         s = bid_vol + ask_vol
         if s == 0:
-            return 0.0
-        return float((bid_vol - ask_vol) / s)
+            return Decimal("0")
+        return (bid_vol - ask_vol) / s
 
     def quoted_spread_bps(self) -> Decimal:
         """(ask - bid) / mid * 10_000 using best touch; matches client if mid present."""
@@ -211,7 +215,7 @@ class OrderBookAnalyzer:
                 return (ap - bp) / m * Decimal("10000")
         return Decimal("0")
 
-    def effective_spread(self, qty: float) -> Decimal:
+    def effective_spread(self, qty: Any) -> Decimal:
         """
         Round-trip cost of immediacy for ``qty`` base (bps vs mid):
         (avg buy on asks - avg sell on bids) / mid * 10_000.
@@ -244,8 +248,8 @@ def _print_report(
     symbol: str,
     ob: dict,
     analyzer: OrderBookAnalyzer,
-    depth_bps: float,
-    walk_sizes: list[float],
+    depth_bps: Decimal,
+    walk_sizes: list[Decimal],
 ) -> None:
     base_ccy = symbol.split("/")[0] if "/" in symbol else "BASE"
     ts = ob.get("timestamp")
@@ -382,8 +386,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--depth", type=int, default=20, help="Depth levels to fetch (default 20)")
     parser.add_argument(
         "--depth-bps",
-        type=float,
-        default=10.0,
+        type=_d,
+        default=Decimal("10"),
         help="Band for depth / imbalance context (default 10 bps)",
     )
     parser.add_argument(
@@ -418,11 +422,11 @@ def main(argv: list[str] | None = None) -> int:
 
     analyzer = OrderBookAnalyzer(ob)
     try:
-        walk_sizes = [float(x.strip()) for x in args.walk.split(",") if x.strip()]
-    except ValueError:
-        walk_sizes = [2.0, 10.0]
+        walk_sizes = [_d(x.strip()) for x in args.walk.split(",") if x.strip()]
+    except Exception:
+        walk_sizes = [Decimal("2"), Decimal("10")]
     if not walk_sizes:
-        walk_sizes = [2.0, 10.0]
+        walk_sizes = [Decimal("2"), Decimal("10")]
 
     _ensure_utf8_stdout()
     _print_report(args.symbol, ob, analyzer, args.depth_bps, walk_sizes)

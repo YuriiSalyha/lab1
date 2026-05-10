@@ -142,7 +142,7 @@ def test_imbalance_range():
     ]
     for ob in cases:
         x = OrderBookAnalyzer(ob).imbalance(levels=10)
-        assert -1.0 <= x <= 1.0
+        assert Decimal("-1") <= x <= Decimal("1")
 
 
 def test_effective_spread_greater_than_quoted():

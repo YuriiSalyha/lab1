@@ -1,7 +1,8 @@
 """Fee model used by the signal generator and the executor.
 
-All arithmetic is in :class:`~decimal.Decimal`. Callers may pass ``float``/``int``
-inputs — they are coerced via :func:`strategy.signal.to_decimal`.
+All arithmetic is in :class:`~decimal.Decimal`. Callers may pass ``str``/``int``
+/ ``Decimal``; ``float`` is coerced via ``str`` only where unavoidable (never
+for intermediate fee math).
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from strategy.signal import to_decimal
 BPS_DENOM = Decimal("10000")
 DEFAULT_CEX_TAKER_BPS = Decimal("10")
 DEFAULT_DEX_SWAP_BPS = Decimal("30")
-DEFAULT_GAS_COST_USD = Decimal("0.10")
+DEFAULT_GAS_COST_USD = Decimal("0.009")
 
 
 def cex_taker_bps_from_ccxt_ratio(taker_ratio: Any) -> Decimal:

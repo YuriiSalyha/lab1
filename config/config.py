@@ -43,3 +43,24 @@ BYBIT_CONFIG = {
     },
     "enableRateLimit": True,
 }
+
+# OKX spot — CCXT requires ``password`` (API passphrase).
+if PRODUCTION:
+    OKX_CONFIG = {
+        "apiKey": os.getenv("OKX_API_KEY"),
+        "secret": os.getenv("OKX_API_SECRET"),
+        "password": os.getenv("OKX_PASSPHRASE", "") or os.getenv("OKX_PASSWORD", ""),
+        "enableRateLimit": True,
+        "options": {"defaultType": "spot"},
+    }
+else:
+    OKX_CONFIG = {
+        "apiKey": os.getenv("OKX_TESTNET_API_KEY") or os.getenv("OKX_API_KEY"),
+        "secret": os.getenv("OKX_TESTNET_SECRET") or os.getenv("OKX_API_SECRET"),
+        "password": os.getenv("OKX_TESTNET_PASSPHRASE")
+        or os.getenv("OKX_PASSPHRASE", "")
+        or os.getenv("OKX_PASSWORD", ""),
+        "sandbox": True,
+        "enableRateLimit": True,
+        "options": {"defaultType": "spot"},
+    }

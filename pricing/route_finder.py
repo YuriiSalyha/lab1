@@ -8,6 +8,7 @@ from pricing.liquidity_graph import build_adjacency, find_all_paths
 from pricing.liquidity_pool import LiquidityPoolQuote, as_liquidity_quote, v2_pools_for_gas_pricing
 from pricing.route import Route
 from pricing.uniswap_v2_pair import UniswapV2Pair
+from pricing.uniswap_v3_pool import UniswapV3PoolQuoter
 
 
 class RouteFinder:
@@ -18,6 +19,11 @@ class RouteFinder:
     def __init__(self, pools: Sequence[LiquidityPoolQuote | UniswapV2Pair]):
         self.pools: list[LiquidityPoolQuote] = [as_liquidity_quote(p) for p in pools]
         self._v2_for_gas = v2_pools_for_gas_pricing(self.pools)
+        # V3 pools used only as a fallback when no V2 WETH pool exists for token_out
+        # (see :func:`pricing.gas_cost.gas_cost_in_output_token`).
+        self._v3_for_gas: list[UniswapV3PoolQuoter] = [
+            p for p in self.pools if isinstance(p, UniswapV3PoolQuoter)
+        ]
         self.graph = build_adjacency(self.pools)
 
     def find_all_routes(
@@ -57,7 +63,11 @@ class RouteFinder:
             gas_units = route.estimate_gas(amount_in)
             gas_wei = gas_cost_wei(gas_units, gas_price_gwei)
             gas_out = gas_cost_in_output_token(
-                self._v2_for_gas, token_out, gas_wei, eth_price_in_output
+                self._v2_for_gas,
+                token_out,
+                gas_wei,
+                eth_price_in_output,
+                v3_pools=self._v3_for_gas,
             )
             net = gross - gas_out
             if net > best_net:
@@ -84,7 +94,11 @@ class RouteFinder:
             gas_estimate = route.estimate_gas(amount_in)
             gas_wei = gas_cost_wei(gas_estimate, gas_price_gwei)
             gas_out = gas_cost_in_output_token(
-                self._v2_for_gas, token_out, gas_wei, eth_price_in_output
+                self._v2_for_gas,
+                token_out,
+                gas_wei,
+                eth_price_in_output,
+                v3_pools=self._v3_for_gas,
             )
             rows.append(
                 {

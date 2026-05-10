@@ -5,8 +5,16 @@ from __future__ import annotations
 import time
 from decimal import Decimal
 
+import pytest
+
 from risk.pre_trade import PreTradeValidator
 from strategy.signal import Direction, Signal
+
+
+@pytest.fixture(autouse=True)
+def _isolate_negative_pnl_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default behaviour expects no negative-PnL floor; clear it for every test."""
+    monkeypatch.delenv("ARB_ALLOW_NEGATIVE_PNL_USD", raising=False)
 
 
 def _mk_signal(**kwargs) -> Signal:

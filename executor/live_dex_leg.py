@@ -12,15 +12,22 @@ bot can run the full production pipeline (route + fork preflight + EIP-1559 buil
 from __future__ import annotations
 
 import logging
+import os
 import time
 from decimal import Decimal
 from typing import Any, Callable, Optional
 
 from chain.builder import TransactionBuilder
+from chain.erc20_approve import ensure_router_allowance
 from chain.uniswap_v2_router import encode_uniswap_v2_swap_calldata
+from chain.uniswap_v3_router import (
+    encode_exact_input_single_calldata,
+    encode_exact_output_single_calldata,
+    resolve_v3_swap_router,
+)
 from core.types import Address, Token, TokenAmount
 from core.wallet import WalletManager
-from pricing.fork_simulator import ForkSimulator
+from pricing.fork_simulator import ForkSimulator, SimulationResult
 from pricing.fork_swap_executor import broadcast_router_calldata
 from pricing.pricing_engine import PricingEngine
 from strategy.dex_token_resolver import find_pool_for_pair
@@ -117,7 +124,9 @@ def sync_execute_live_dex_leg(
 
     Returns the same shape as :meth:`executor.engine.Executor._execute_dex_leg` simulation dict.
     """
-    if pricing_engine.route_finder is None or not pricing_engine.pools:
+    has_v2 = bool(pricing_engine.pools)
+    has_v3 = bool(getattr(pricing_engine, "v3_pools", {}))
+    if pricing_engine.route_finder is None or (not has_v2 and not has_v3):
         return {
             "success": False,
             "price": signal.dex_price,
@@ -152,73 +161,216 @@ def sync_execute_live_dex_leg(
             "dry_run": dry_run,
         }
 
-    router = pricing_engine.swap_router
     sender = Address.from_string(wallet.address)
     deadline = int(time.time()) + int(deadline_seconds) + DEADLINE_BUFFER_S
-    rpc_url = client.rpc_urls[0]
     buys = dex_leg_buys_base(direction)
     parts = signal.pair.strip().upper().split("/")
     base_sym, quote_sym = parts[0], parts[1]
     quote_atoms_for_price = 0
 
+    # Pick V2 vs V3 dispatch from the signal metadata stamped by SignalGenerator.
+    # Default to V2 so older signals (and any external producers) keep working.
+    dex_kind = str(signal.metadata.get("dex_kind", "v2")).lower()
+    fee_tier = int(signal.metadata.get("fee_tier", 0) or 0)
+
     try:
-        if buys:
-            pool = find_pool_for_pair(pricing_engine.pools, base_sym, quote_sym)
-            quote_in_needed = pool.get_amount_in(base_raw, base_t)
-            quote_atoms_for_price = quote_in_needed
-            amount_in_max = _amount_in_max_with_slippage(quote_in_needed, slippage_bps)
-            path_tokens = [quote_t.address, base_t.address]
-            calldata = encode_uniswap_v2_swap_calldata(
-                "swapTokensForExactTokens",
-                path=path_tokens,
-                to=sender,
-                deadline=deadline,
-                amount_out=base_raw,
-                amount_in_max=amount_in_max,
-            )
-            swap_params: dict[str, Any] = {
-                "function": "swapTokensForExactTokens",
-                "amount_out": base_raw,
-                "amount_in_max": amount_in_max,
-                "path": path_tokens,
-                "to": sender,
-                "deadline": deadline,
-            }
-        else:
-            rf = pricing_engine.route_finder
-            route, _net = rf.find_best_route(base_t, quote_t, base_raw, 0, max_hops=3)
-            if route is None:
+        if dex_kind == "v3":
+            if fee_tier <= 0:
                 return {
                     "success": False,
                     "price": signal.dex_price,
                     "filled": Decimal("0"),
-                    "error": "no_route",
+                    "error": "v3_missing_fee_tier",
                     "dry_run": dry_run,
                 }
-            gross = route.get_output(base_raw)
-            quote_atoms_for_price = gross
-            amount_out_min = _amount_out_min_from_gross(gross, slippage_bps)
-            path_tokens = [t.address for t in route.path]
-            calldata = encode_uniswap_v2_swap_calldata(
-                "swapExactTokensForTokens",
-                path=path_tokens,
-                to=sender,
-                deadline=deadline,
-                amount_in=base_raw,
-                amount_out_min=amount_out_min,
-            )
-            swap_params = {
-                "function": "swapExactTokensForTokens",
-                "amount_in": base_raw,
-                "amount_out_min": amount_out_min,
-                "path": path_tokens,
-                "to": sender,
-                "deadline": deadline,
-            }
+            router = resolve_v3_swap_router(None)
+            if buys:
+                # Exact-output: pay up to amount_in_max quote for exactly base_raw base.
+                # We size amount_in_max from the executor's expected dex_price (the
+                # signal's dex_price is quote-per-base in human units) plus slippage.
+                size_human = to_decimal(size_base_human)
+                expected_quote_human = size_human * to_decimal(signal.dex_price)
+                quote_atoms_expected = int(
+                    TokenAmount.from_human(
+                        expected_quote_human, quote_t.decimals, quote_t.symbol
+                    ).raw
+                )
+                quote_atoms_for_price = quote_atoms_expected
+                amount_in_max = _amount_in_max_with_slippage(quote_atoms_expected, slippage_bps)
+                calldata = encode_exact_output_single_calldata(
+                    token_in=quote_t.address,
+                    token_out=base_t.address,
+                    fee=fee_tier,
+                    recipient=sender,
+                    amount_out=base_raw,
+                    amount_in_max=amount_in_max,
+                )
+                swap_params = {
+                    "function": "exactOutputSingle",
+                    "token_in": quote_t.address,
+                    "token_out": base_t.address,
+                    "fee": fee_tier,
+                    "recipient": sender,
+                    "amount_out": base_raw,
+                    "amount_in_max": amount_in_max,
+                    "deadline": deadline,
+                }
+            else:
+                size_human = to_decimal(size_base_human)
+                expected_quote_human = size_human * to_decimal(signal.dex_price)
+                gross_quote_atoms = int(
+                    TokenAmount.from_human(
+                        expected_quote_human, quote_t.decimals, quote_t.symbol
+                    ).raw
+                )
+                quote_atoms_for_price = gross_quote_atoms
+                amount_out_min = _amount_out_min_from_gross(gross_quote_atoms, slippage_bps)
+                calldata = encode_exact_input_single_calldata(
+                    token_in=base_t.address,
+                    token_out=quote_t.address,
+                    fee=fee_tier,
+                    recipient=sender,
+                    amount_in=base_raw,
+                    amount_out_min=amount_out_min,
+                )
+                swap_params = {
+                    "function": "exactInputSingle",
+                    "token_in": base_t.address,
+                    "token_out": quote_t.address,
+                    "fee": fee_tier,
+                    "recipient": sender,
+                    "amount_in": base_raw,
+                    "amount_out_min": amount_out_min,
+                    "deadline": deadline,
+                }
+        else:
+            router = pricing_engine.swap_router
+            if buys:
+                pool = find_pool_for_pair(pricing_engine.pools, base_sym, quote_sym)
+                quote_in_needed = pool.get_amount_in(base_raw, base_t)
+                quote_atoms_for_price = quote_in_needed
+                amount_in_max = _amount_in_max_with_slippage(quote_in_needed, slippage_bps)
+                path_tokens = [quote_t.address, base_t.address]
+                calldata = encode_uniswap_v2_swap_calldata(
+                    "swapTokensForExactTokens",
+                    path=path_tokens,
+                    to=sender,
+                    deadline=deadline,
+                    amount_out=base_raw,
+                    amount_in_max=amount_in_max,
+                )
+                swap_params: dict[str, Any] = {
+                    "function": "swapTokensForExactTokens",
+                    "amount_out": base_raw,
+                    "amount_in_max": amount_in_max,
+                    "path": path_tokens,
+                    "to": sender,
+                    "deadline": deadline,
+                }
+            else:
+                rf = pricing_engine.route_finder
+                route, _net = rf.find_best_route(base_t, quote_t, base_raw, 0, max_hops=3)
+                if route is None:
+                    return {
+                        "success": False,
+                        "price": signal.dex_price,
+                        "filled": Decimal("0"),
+                        "error": "no_route",
+                        "dry_run": dry_run,
+                    }
+                gross = route.get_output(base_raw)
+                quote_atoms_for_price = gross
+                amount_out_min = _amount_out_min_from_gross(gross, slippage_bps)
+                path_tokens = [t.address for t in route.path]
+                calldata = encode_uniswap_v2_swap_calldata(
+                    "swapExactTokensForTokens",
+                    path=path_tokens,
+                    to=sender,
+                    deadline=deadline,
+                    amount_in=base_raw,
+                    amount_out_min=amount_out_min,
+                )
+                swap_params = {
+                    "function": "swapExactTokensForTokens",
+                    "amount_in": base_raw,
+                    "amount_out_min": amount_out_min,
+                    "path": path_tokens,
+                    "to": sender,
+                    "deadline": deadline,
+                }
+
+        # Ensure the router has ERC-20 allowance for the **input** token before
+        # preflight or broadcast. Without it, every V2/V3 swap reverts with
+        # ``TransferHelper: TRANSFER_FROM_FAILED`` inside ``safeTransferFrom``.
+        # ``ensure_router_allowance`` is idempotent + memoized, so this costs
+        # one chain read on the steady state and exactly one ``approve`` tx
+        # the first time the bot sees a given (token_in, router) pair.
+        # Skip in dry-run-signed: that mode never broadcasts the swap so
+        # spending gas on a real approve would defeat the dry-run guarantee.
+        allowance_info: dict[str, Any] = {}
+        if not dry_run:
+            if buys:
+                token_in_addr = quote_t.address
+                # ``amount_in_max`` was set on both V2 and V3 buy branches.
+                min_allowance = int(amount_in_max)  # type: ignore[possibly-undefined]
+            else:
+                token_in_addr = base_t.address
+                min_allowance = int(base_raw)
+            try:
+                allowance_info = ensure_router_allowance(
+                    client=client,
+                    wallet=wallet,
+                    token=token_in_addr,
+                    spender=router,
+                    min_amount=min_allowance,
+                )
+            except Exception as approve_exc:  # noqa: BLE001
+                logger.warning("router allowance check/approve failed: %s", approve_exc)
+                return {
+                    "success": False,
+                    "price": signal.dex_price,
+                    "filled": Decimal("0"),
+                    "error": f"approve_failed:{approve_exc}",
+                    "dry_run": dry_run,
+                }
+            # Public RPC clusters can serve a different ``latest`` on a second HTTP
+            # connection; preflight used a fresh Web3 provider and reverted with
+            # ``TRANSFER_FROM_FAILED`` even after a mined approve on the primary
+            # client. Re-use ChainClient.w3 for simulation and give state a moment
+            # to propagate when we just broadcast approve.
+            if allowance_info.get("approved") is True:
+                delay_s = float(os.environ.get("DEX_POST_APPROVE_DELAY_SEC", "1.5"))
+                if delay_s > 0:
+                    logger.info(
+                        "DEX post-approve delay %.2fs before preflight",
+                        delay_s,
+                    )
+                    time.sleep(delay_s)
 
         preflight_gas_used: Optional[int] = None
         if run_preflight:
-            sim = ForkSimulator(rpc_url).simulate_swap(router, swap_params, sender)
+            max_attempts = max(1, int(os.environ.get("DEX_PREFLIGHT_RETRIES", "5")))
+            backoff = float(os.environ.get("DEX_PREFLIGHT_RETRY_BACKOFF_SEC", "0.5"))
+            fork = ForkSimulator(w3=client.w3)
+            sim: SimulationResult | None = None
+            for attempt in range(max_attempts):
+                sim = fork.simulate_swap(router, swap_params, sender)
+                if sim.success:
+                    break
+                err = (sim.error or "").upper()
+                if attempt + 1 < max_attempts and "TRANSFER_FROM" in err:
+                    wait_s = backoff * (2**attempt)
+                    logger.info(
+                        "DEX preflight retry %s/%s after %.2fs (%s)",
+                        attempt + 1,
+                        max_attempts,
+                        wait_s,
+                        sim.error,
+                    )
+                    time.sleep(wait_s)
+                    continue
+                break
+            assert sim is not None
             if not sim.success:
                 return {
                     "success": False,

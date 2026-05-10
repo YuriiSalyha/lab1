@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from eth_abi import encode
+from web3 import Web3
 from web3.exceptions import ContractLogicError
 
 from core.types import Address, Token
@@ -56,6 +57,17 @@ def test_build_calldata_raw_vs_structured_equivalent() -> None:
 def test_build_calldata_missing_data_raises() -> None:
     with pytest.raises(ValueError, match="function"):
         _build_calldata_from_swap_params({"path": [T0], "to": SENDER, "deadline": 1})
+
+
+def test_fork_simulator_requires_fork_url_or_w3() -> None:
+    with pytest.raises(ValueError, match="fork_url or"):
+        ForkSimulator()
+
+
+def test_fork_simulator_accepts_explicit_w3() -> None:
+    w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:9"))
+    sim = ForkSimulator(w3=w3)
+    assert sim.w3 is w3
 
 
 def test_simulate_swap_success_decodes_amounts() -> None:

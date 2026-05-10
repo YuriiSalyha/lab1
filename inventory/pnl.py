@@ -49,6 +49,15 @@ class ArbRecord:
     buy_leg: TradeLeg
     sell_leg: TradeLeg
     gas_cost_usd: Decimal = Decimal("0")
+    dex_tx_hash: str | None = None
+    #: Modeled CEX+DEX+flat gas USD from :class:`~strategy.fees.FeeStructure`
+    #: (matches executor ``total_fee_usd``) when leg-level fees are unknown.
+    executor_fee_bundle_usd: Decimal = Decimal("0")
+
+    @property
+    def transaction_hash(self) -> str | None:
+        """Hex transaction hash of the on-chain DEX leg (broadcast or dry-run synthetic)."""
+        return self.dex_tx_hash
 
     @property
     def _buy_quote(self) -> Decimal:
@@ -65,10 +74,10 @@ class ArbRecord:
 
     @property
     def total_fees(self) -> Decimal:
-        """All fees: both legs (USD) + gas (USD)."""
+        """Leg fees (USD) + optional receipt gas + executor modeled fee bundle."""
         b = _fee_to_usd(self.buy_leg.fee, self.buy_leg.fee_asset)
         s = _fee_to_usd(self.sell_leg.fee, self.sell_leg.fee_asset)
-        return b + s + self.gas_cost_usd
+        return b + s + self.gas_cost_usd + self.executor_fee_bundle_usd
 
     @property
     def net_pnl(self) -> Decimal:
@@ -176,6 +185,7 @@ class PnLEngine:
                     "net_pnl_usd": t.net_pnl,
                     "net_pnl_bps": t.net_pnl_bps,
                     "profitable": t.net_pnl > 0,
+                    "transaction_hash": t.transaction_hash or "",
                 }
             )
         return out
@@ -203,6 +213,7 @@ class PnLEngine:
             "sell_leg_id",
             "sell_venue",
             "symbol",
+            "transaction_hash",
         ]
         with path.open("w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=fieldnames)
@@ -223,6 +234,7 @@ class PnLEngine:
                         "sell_leg_id": t.sell_leg.id,
                         "sell_venue": t.sell_leg.venue.value,
                         "symbol": t.buy_leg.symbol,
+                        "transaction_hash": t.transaction_hash or "",
                     }
                 )
 

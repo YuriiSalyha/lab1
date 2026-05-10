@@ -149,6 +149,49 @@ def test_limit_ioc_returns_fill_info(client, mock_ccxt_binance):
     assert out["time_in_force"] == "IOC"
 
 
+def test_limit_ioc_fetch_order_when_status_missing(client, mock_ccxt_binance):
+    """OKX-style create response can omit ``status``; client resolves via ``fetch_order``."""
+    mock_ccxt_binance.create_order.return_value = {
+        "id": "oid-pending",
+        "symbol": "ETH/USDT",
+        "type": "limit",
+        "side": "buy",
+        "amount": 0.1,
+        "filled": 0,
+        "average": None,
+        "status": None,
+        "timestamp": 999,
+        "timeInForce": "IOC",
+    }
+    mock_ccxt_binance.fetch_order.return_value = {
+        "id": "oid-pending",
+        "symbol": "ETH/USDT",
+        "filled": 0.1,
+        "average": 2500.0,
+        "status": "closed",
+        "amount": 0.1,
+        "timestamp": 1000,
+        "timeInForce": "IOC",
+    }
+    out = client.create_limit_ioc_order("ETH/USDT", "buy", 0.1, 2500.0)
+    mock_ccxt_binance.fetch_order.assert_called_once()
+    assert out["status"] == "closed"
+    assert out["amount_filled"] == Decimal("0.1")
+
+
+def test_limit_ioc_no_extra_fetch_when_terminal(client, mock_ccxt_binance):
+    mock_ccxt_binance.create_order.return_value = {
+        "id": "oid1",
+        "symbol": "ETH/USDT",
+        "filled": 0,
+        "average": None,
+        "status": "canceled",
+        "amount": 0.1,
+    }
+    client.create_limit_ioc_order("ETH/USDT", "buy", 0.1, 2500.0)
+    mock_ccxt_binance.fetch_order.assert_not_called()
+
+
 def test_rate_limiter_blocks_when_exhausted():
     """Requests blocked when weight limit reached."""
     lim = WeightRateLimiter(max_weight=2, window_sec=60.0)
@@ -179,8 +222,8 @@ def test_orderbook_weight_brackets():
     assert orderbook_request_weight(200) == 25
 
 
-def test_orderbook_weight_for_exchange_bybit():
-    assert orderbook_request_weight_for_exchange("bybit", 500) == 1
+def test_orderbook_weight_for_exchange_okx():
+    assert orderbook_request_weight_for_exchange("okx", 500) == 1
 
 
 def test_exchange_id_rejected():
@@ -329,4 +372,51 @@ def test_max_taker_fee_bps_skips_failed_symbol(client, mock_ccxt_binance):
         {"maker": "0", "taker": "0.001"},
     ]
     bps = client.max_taker_fee_bps_for_symbols(["ETH/USDT", "BTC/USDT"])
+    assert bps == Decimal("10")
+
+
+@pytest.fixture
+def mock_ccxt_okx():
+    ex = MagicMock()
+    ex.fetch_time.return_value = 1_700_000_000_000
+    ex.enableRateLimit = True
+    ex.enableLastResponseHeaders = True
+    ex.last_response_headers = {}
+    return ex
+
+
+@pytest.fixture
+def okx_client(mock_ccxt_okx):
+    with patch("exchange.client.ccxt.okx", return_value=mock_ccxt_okx):
+        return ExchangeClient(
+            {"apiKey": "k", "secret": "s", "password": "p"},
+            exchange_id="okx",
+        )
+
+
+def test_get_trading_fees_normalizes_okx_negative_taker(okx_client, mock_ccxt_okx):
+    mock_ccxt_okx.fetch_trading_fee.return_value = {"maker": "-0.0008", "taker": "-0.001"}
+    fees = okx_client.get_trading_fees("ETH/USDT")
+    assert fees["taker"] == Decimal("0.001")
+    assert fees["maker"] == Decimal("0.0008")
+
+
+def test_okx_max_taker_prefers_account_trade_fee(okx_client, mock_ccxt_okx):
+    mock_ccxt_okx.private_get_account_trade_fee.return_value = {
+        "code": "0",
+        "data": [{"taker": "-0.001", "maker": "-0.0008"}],
+    }
+    bps = okx_client.max_taker_fee_bps_for_symbols(["ETH/USDT"])
+    assert bps == Decimal("10")
+    mock_ccxt_okx.private_get_account_trade_fee.assert_called_once_with({"instType": "SPOT"})
+    mock_ccxt_okx.fetch_trading_fee.assert_not_called()
+    bps2 = okx_client.max_taker_fee_bps_for_symbols(["ETH/USDT"])
+    assert bps2 == Decimal("10")
+    assert mock_ccxt_okx.private_get_account_trade_fee.call_count == 1
+
+
+def test_okx_max_taker_falls_back_when_bulk_fails(okx_client, mock_ccxt_okx):
+    mock_ccxt_okx.private_get_account_trade_fee.side_effect = Exception("auth")
+    mock_ccxt_okx.fetch_trading_fee.return_value = {"maker": "0", "taker": "-0.001"}
+    bps = okx_client.max_taker_fee_bps_for_symbols(["ETH/USDT"])
     assert bps == Decimal("10")
