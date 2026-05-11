@@ -6,9 +6,9 @@
 -PnL: $XX
 -Trades: 5 (0 wins, 5 losses)
 -Win rate: 0%
--Best trade: $−0.00247
--Worst trade: $-0.01498
--Fees paid: $0,005 (CEX) + $0.033 (DEX gas) + $0.105 (DEX)
+-Best trade: $−0.01497
+-Worst trade: $-0.01846
+-Fees paid: $0,005 (CEX) + $0.10 (DEX gas) + $0.015 (DEX)
 
 ### What Happened
 - I once almost got a positive trade. I had a moment with

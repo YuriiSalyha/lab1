@@ -8,7 +8,7 @@
 -Win rate: 0%
 -Best trade: $-0.02197410431031481851510816109
 -Worst trade: $-0.02198905331821787633462982139
--Fees paid: $0,002 (CEX) + $0.042 (DEX) + $0.006 (DEX gas) + 0.03(rebalancing fees)
+-Fees paid: $0,002 (CEX) + $0.006 (DEX) + $0.04 (DEX gas) + 0.03(rebalancing fees)
 
 ### What Happened
 - I launched again to check if my tx will happen. After it, I changed the bot
