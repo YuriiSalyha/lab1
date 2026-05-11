@@ -8,7 +8,7 @@
 -Win rate: 0%
 -Best trade: $-0.02497220568
 -Worst trade: $-0.02498720568
--Fees paid: $0,004 (CEX) + $0.084 (DEX) + $0.012 (DEX gas)
+-Fees paid: $0,004 (CEX) + $0,012 (DEX) + $0.08 (DEX gas)
 
 ### What Happened
 - I designed a situation that, despite a slight pnl loss, helped me test and fix
