@@ -45,7 +45,7 @@ Mostly environment only: I lowered `ARB_CONSECUTIVE_LOSS_LIMIT`, `ARB_MAX_DAILY_
 |--------|--------|
 | Total trades | 11 |
 | Win rate | 0% |
-| Total PnL | Positive overall, but largely because ETH appreciated |
+| Total PnL | $-0.206 |
 | Max drawdown | Less than 0.1% |
 | Starting capital | $100 |
 | Ending capital | $102.01 |

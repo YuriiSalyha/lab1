@@ -3,7 +3,7 @@
 ### Numbers
 -Starting capital: $102.7
 -Ending capital: $102.04
--PnL: $XX
+-PnL: $-0.04995
 -Trades: 2 (0 wins, 2 losses)
 -Win rate: 0%
 -Best trade: $-0.02197410431031481851510816109
